@@ -1491,3 +1491,813 @@ def compare_before_after(tasks_df, task_id):
         '处理结果': task.get('处理结果'),
         '处理备注': task.get('处理备注')
     }
+
+
+CREW_TYPES = {
+    'INSPECTION': {'name': '巡检组', 'capabilities': ['巡检', '复检'], 'max_daily_tasks': 8, 'max_daily_distance': 50},
+    'DREDGING': {'name': '清淤组', 'capabilities': ['清淤'], 'max_daily_tasks': 4, 'max_daily_distance': 30},
+    'MULTI': {'name': '综合组', 'capabilities': ['巡检', '复检', '清淤'], 'max_daily_tasks': 6, 'max_daily_distance': 40}
+}
+
+EQUIPMENT_TYPES = {
+    'CCTV': {'name': 'CCTV检测车', 'capabilities': ['巡检', '复检'], 'daily_cost': 500},
+    'HIGH_PRESSURE': {'name': '高压冲洗车', 'capabilities': ['清淤'], 'daily_cost': 800},
+    'VACUUM': {'name': '吸污车', 'capabilities': ['清淤'], 'daily_cost': 1000},
+    'HAND_TOOLS': {'name': '人工工具', 'capabilities': ['巡检', '复检', '清淤'], 'daily_cost': 100}
+}
+
+DEFAULT_CREWS = [
+    {'crew_id': 'CREW_A', 'crew_name': '巡检组A', 'crew_type': 'INSPECTION', 'members': '张工、李工、王工',
+     'equipment': ['CCTV', 'HAND_TOOLS'], 'base_location': 'A区', 'status': 'ACTIVE'},
+    {'crew_id': 'CREW_B', 'crew_name': '巡检组B', 'crew_type': 'INSPECTION', 'members': '刘工、陈工、赵工',
+     'equipment': ['CCTV', 'HAND_TOOLS'], 'base_location': 'B区', 'status': 'ACTIVE'},
+    {'crew_id': 'DREDGE_1', 'crew_name': '清淤组1', 'crew_type': 'DREDGING', 'members': '王队长、周工、吴工',
+     'equipment': ['HIGH_PRESSURE', 'VACUUM'], 'base_location': 'A区', 'status': 'ACTIVE'},
+    {'crew_id': 'DREDGE_2', 'crew_name': '清淤组2', 'crew_type': 'DREDGING', 'members': '赵队长、郑工、孙工',
+     'equipment': ['HIGH_PRESSURE', 'VACUUM'], 'base_location': 'B区', 'status': 'ACTIVE'},
+    {'crew_id': 'MULTI_1', 'crew_name': '机动组', 'crew_type': 'MULTI', 'members': '刘工、钱工',
+     'equipment': ['HAND_TOOLS'], 'base_location': '中心站', 'status': 'ACTIVE'}
+]
+
+LOCATION_COORDINATES = {
+    'A区': {'lat': 31.2304, 'lng': 121.4737, 'x': 0, 'y': 0},
+    'B区': {'lat': 31.2350, 'lng': 121.4800, 'x': 5, 'y': 5},
+    'C区': {'lat': 31.2250, 'lng': 121.4650, 'x': -5, 'y': -5},
+    'D区': {'lat': 31.2400, 'lng': 121.4600, 'x': -8, 'y': 8},
+    'E区': {'lat': 31.2200, 'lng': 121.4850, 'x': 8, 'y': -8},
+    '中心站': {'lat': 31.2300, 'lng': 121.4700, 'x': 0, 'y': 0}
+}
+
+TASK_DURATION_ESTIMATES = {
+    'INSPECTION': {'base': 30, 'per_mm': 0.02, 'min': 15, 'max': 60},
+    'REINSPECTION': {'base': 25, 'per_mm': 0.015, 'min': 10, 'max': 45},
+    'DREDGING': {'base': 60, 'per_mm': 0.15, 'min': 30, 'max': 180}
+}
+
+
+def initialize_crews():
+    return pd.DataFrame(DEFAULT_CREWS)
+
+
+def get_location_coords(district, pipe_id=None):
+    base = LOCATION_COORDINATES.get(district, LOCATION_COORDINATES['中心站'])
+    if pipe_id:
+        try:
+            pipe_num = int(''.join(filter(str.isdigit, pipe_id)))
+            offset_x = (pipe_num % 10) * 0.5
+            offset_y = ((pipe_num // 10) % 10) * 0.5
+            return {
+                'lat': base['lat'] + offset_x * 0.001,
+                'lng': base['lng'] + offset_y * 0.001,
+                'x': base['x'] + offset_x,
+                'y': base['y'] + offset_y
+            }
+        except:
+            pass
+    return base
+
+
+def calculate_distance(loc1, loc2):
+    dx = loc1.get('x', 0) - loc2.get('x', 0)
+    dy = loc1.get('y', 0) - loc2.get('y', 0)
+    return round((dx ** 2 + dy ** 2) ** 0.5, 2)
+
+
+def estimate_task_duration(task_row, historical_data=None):
+    task_type_code = task_row.get('任务类型编码', 'INSPECTION')
+    depth = task_row.get('最新淤积深度(mm)', 0)
+    diameter = task_row.get('管径(mm)', 500)
+
+    params = TASK_DURATION_ESTIMATES.get(task_type_code, TASK_DURATION_ESTIMATES['INSPECTION'])
+    base_time = params['base']
+    per_mm_time = params['per_mm']
+
+    estimated = base_time + depth * per_mm_time + (diameter / 100) * 5
+
+    if historical_data is not None and not historical_data.empty:
+        pipe_id = task_row.get('管段编号')
+        same_pipe = historical_data[historical_data['管段编号'] == pipe_id]
+        if not same_pipe.empty:
+            avg_historical = same_pipe['实际处理时长(分钟)'].mean()
+            if pd.notna(avg_historical):
+                estimated = estimated * 0.6 + avg_historical * 0.4
+
+    estimated = max(params['min'], min(params['max'], estimated))
+    return round(estimated, 1)
+
+
+def calculate_historical_durations(tasks_df):
+    if tasks_df is None or tasks_df.empty:
+        return pd.DataFrame()
+
+    closed_tasks = tasks_df[tasks_df['任务状态编码'] == 'CLOSED'].copy()
+    if closed_tasks.empty:
+        return pd.DataFrame()
+
+    durations = []
+    for _, row in closed_tasks.iterrows():
+        start = row.get('处理开始时间')
+        end = row.get('处理完成时间')
+        if pd.notna(start) and pd.notna(end):
+            duration_min = (end - start).total_seconds() / 60
+            durations.append({
+                '管段编号': row['管段编号'],
+                '片区': row['片区'],
+                '任务类型': row['任务类型'],
+                '任务类型编码': row['任务类型编码'],
+                '实际处理时长(分钟)': round(duration_min, 1),
+                '处理人员': row.get('处理人员', ''),
+                '完成日期': end.date()
+            })
+
+    return pd.DataFrame(durations)
+
+
+def _greedy_route_optimization(tasks, crew_base, max_distance, max_tasks):
+    if not tasks:
+        return [], 0, 0
+
+    current_loc = crew_base
+    remaining = tasks.copy()
+    route = []
+    total_distance = 0
+    total_duration = 0
+
+    while remaining and len(route) < max_tasks:
+        best_idx = -1
+        best_score = -float('inf')
+        best_distance = 0
+
+        for i, task in enumerate(remaining):
+            task_loc = get_location_coords(task['片区'], task['管段编号'])
+            dist = calculate_distance(current_loc, task_loc)
+            priority = task.get('优先级评分', 50)
+
+            urgency_bonus = 0
+            deadline = task.get('截止时间')
+            if deadline:
+                days_left = (deadline - datetime.now()).days
+                if days_left <= 1:
+                    urgency_bonus = 30
+                elif days_left <= 3:
+                    urgency_bonus = 15
+
+            score = priority - dist * 2 + urgency_bonus
+
+            if score > best_score:
+                best_score = score
+                best_idx = i
+                best_distance = dist
+
+        if best_idx >= 0:
+            best_task = remaining.pop(best_idx)
+            total_distance += best_distance
+
+            if total_distance > max_distance and route:
+                remaining.append(best_task)
+                break
+
+            route.append(best_task)
+            total_duration += best_task.get('预估时长(分钟)', 30)
+            current_loc = get_location_coords(best_task['片区'], best_task['管段编号'])
+        else:
+            break
+
+    return route, round(total_distance, 2), round(total_duration, 1)
+
+
+def _two_opt_improvement(route, crew_base):
+    if len(route) < 3:
+        return route, 0
+
+    def calculate_route_distance(r):
+        if not r:
+            return 0
+        dist = calculate_distance(crew_base, get_location_coords(r[0]['片区'], r[0]['管段编号']))
+        for i in range(len(r) - 1):
+            dist += calculate_distance(
+                get_location_coords(r[i]['片区'], r[i]['管段编号']),
+                get_location_coords(r[i + 1]['片区'], r[i + 1]['管段编号'])
+            )
+        return dist
+
+    best_route = route.copy()
+    best_distance = calculate_route_distance(best_route)
+    improved = True
+
+    while improved:
+        improved = False
+        for i in range(len(best_route) - 1):
+            for j in range(i + 1, len(best_route)):
+                new_route = best_route[:i] + best_route[i:j + 1][::-1] + best_route[j + 1:]
+                new_distance = calculate_route_distance(new_route)
+                if new_distance < best_distance - 0.01:
+                    best_route = new_route
+                    best_distance = new_distance
+                    improved = True
+                    break
+            if improved:
+                break
+
+    return best_route, round(best_distance, 2)
+
+
+def generate_daily_schedule(tasks_df, crews_df=None, schedule_date=None,
+                            include_types=None, exclude_status=None, rules=None):
+    rules = get_effective_rules(rules)
+    if tasks_df is None or tasks_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), {}
+
+    if crews_df is None or crews_df.empty:
+        crews_df = initialize_crews()
+
+    if schedule_date is None:
+        schedule_date = datetime.now().date()
+
+    if exclude_status is None:
+        exclude_status = ['已完成', '已闭环']
+
+    available_tasks = tasks_df[~tasks_df['任务状态'].isin(exclude_status)].copy()
+
+    if include_types:
+        available_tasks = available_tasks[available_tasks['任务类型'].isin(include_types)]
+
+    if available_tasks.empty:
+        return pd.DataFrame(), pd.DataFrame(), {'error': '没有可调度的任务'}
+
+    historical_durations = calculate_historical_durations(tasks_df)
+
+    available_tasks['预估时长(分钟)'] = available_tasks.apply(
+        lambda x: estimate_task_duration(x, historical_durations), axis=1
+    )
+
+    active_crews = crews_df[crews_df['status'] == 'ACTIVE'].copy()
+
+    schedules = []
+    unassigned_tasks = []
+    warnings = []
+
+    for _, crew_row in active_crews.iterrows():
+        crew_type = crew_row['crew_type']
+        crew_info = CREW_TYPES.get(crew_type, CREW_TYPES['INSPECTION'])
+        capabilities = crew_info['capabilities']
+        max_distance = crew_info['max_daily_distance']
+        max_tasks = crew_info['max_daily_tasks']
+        base_location = crew_row['base_location']
+        base_coords = get_location_coords(base_location)
+
+        crew_tasks = available_tasks[available_tasks['任务类型'].isin(capabilities)].copy()
+
+        if crew_tasks.empty:
+            continue
+
+        crew_coords = crew_tasks.apply(
+            lambda x: pd.Series(get_location_coords(x['片区'], x['管段编号'])), axis=1
+        )
+        crew_tasks = pd.concat([crew_tasks, crew_coords], axis=1)
+
+        task_list = crew_tasks.to_dict('records')
+
+        route, total_distance, total_duration = _greedy_route_optimization(
+            task_list, base_coords, max_distance, max_tasks
+        )
+
+        route, total_distance = _two_opt_improvement(route, base_coords)
+
+        assigned_ids = [t['任务编号'] for t in route]
+        available_tasks = available_tasks[~available_tasks['任务编号'].isin(assigned_ids)]
+
+        work_start = datetime.combine(schedule_date, datetime.strptime('08:00', '%H:%M').time())
+        current_time = work_start
+
+        for seq, task in enumerate(route, 1):
+            task_loc = get_location_coords(task['片区'], task['管段编号'])
+            if seq == 1:
+                travel_from_base = calculate_distance(base_coords, task_loc)
+            else:
+                prev_loc = get_location_coords(route[seq - 2]['片区'], route[seq - 2]['管段编号'])
+                travel_from_base = calculate_distance(prev_loc, task_loc)
+
+            duration = task.get('预估时长(分钟)', 30)
+            travel_minutes = travel_from_base * 3
+            arrival_time = current_time + pd.Timedelta(minutes=travel_minutes)
+            start_time = arrival_time
+            end_time = start_time + pd.Timedelta(minutes=duration)
+
+            schedules.append({
+                '计划编号': f"PLAN{schedule_date.strftime('%Y%m%d')}{crew_row['crew_id']}{seq:03d}",
+                '计划日期': schedule_date,
+                '班组编号': crew_row['crew_id'],
+                '班组名称': crew_row['crew_name'],
+                '班组类型': crew_info['name'],
+                '成员': crew_row['members'],
+                '任务编号': task['任务编号'],
+                '管段编号': task['管段编号'],
+                '片区': task['片区'],
+                '任务类型': task['任务类型'],
+                '动态优先级': task['动态优先级'],
+                '优先级评分': task['优先级评分'],
+                '顺序': seq,
+                '预估行程(km)': round(travel_from_base, 2),
+                '预估时长(分钟)': duration,
+                '预计到达时间': arrival_time,
+                '预计开始时间': start_time,
+                '预计完成时间': end_time,
+                '位置坐标': f"{task_loc['lat']:.4f}, {task_loc['lng']:.4f}",
+                '计划状态': '待执行',
+                '实际开始时间': None,
+                '实际完成时间': None,
+                '实际行程(km)': None,
+                '执行偏差(分钟)': None,
+                '执行状态': '未开始',
+                '备注': ''
+            })
+
+            current_time = end_time + pd.Timedelta(minutes=5)
+
+        total_tasks = len(route)
+        total_hours = total_duration / 60
+
+        if total_hours > 8:
+            warnings.append({
+                'crew_id': crew_row['crew_id'],
+                'crew_name': crew_row['crew_name'],
+                'type': 'overload',
+                'message': f"班组日工作时长预估 {total_hours:.1f} 小时，超过8小时标准"
+            })
+
+    unassigned_tasks = available_tasks.to_dict('records')
+
+    if unassigned_tasks:
+        warnings.append({
+            'type': 'unassigned',
+            'message': f"还有 {len(unassigned_tasks)} 个任务未能安排，建议增加班组或调整计划"
+        })
+
+    schedule_df = pd.DataFrame(schedules) if schedules else pd.DataFrame()
+    unassigned_df = pd.DataFrame(unassigned_tasks) if unassigned_tasks else pd.DataFrame()
+
+    if not schedule_df.empty:
+        conflicts = detect_schedule_conflicts(schedule_df)
+        if conflicts:
+            warnings.extend(conflicts)
+
+    summary = {
+        'total_tasks_available': len(tasks_df[~tasks_df['任务状态'].isin(exclude_status)]),
+        'total_tasks_scheduled': len(schedule_df),
+        'total_tasks_unassigned': len(unassigned_df),
+        'crews_used': schedule_df['班组编号'].nunique() if not schedule_df.empty else 0,
+        'schedule_date': schedule_date,
+        'warnings': warnings
+    }
+
+    return schedule_df, unassigned_df, summary
+
+
+def detect_schedule_conflicts(schedule_df):
+    if schedule_df is None or schedule_df.empty:
+        return []
+
+    conflicts = []
+
+    for crew_id, group in schedule_df.groupby('班组编号'):
+        group = group.sort_values('顺序')
+        for i in range(len(group) - 1):
+            curr = group.iloc[i]
+            next_task = group.iloc[i + 1]
+
+            curr_end = curr['预计完成时间']
+            next_start = next_task['预计开始时间']
+
+            if curr_end > next_start:
+                overlap = (curr_end - next_start).total_seconds() / 60
+                conflicts.append({
+                    'crew_id': crew_id,
+                    'crew_name': curr['班组名称'],
+                    'type': 'time_conflict',
+                    'message': f"任务 {curr['任务编号']} 与 {next_task['任务编号']} 时间冲突，重叠 {overlap:.0f} 分钟"
+                })
+
+    for (task_id, date), group in schedule_df.groupby(['任务编号', '计划日期']):
+        if len(group) > 1:
+            crews = ', '.join(group['班组名称'].tolist())
+            conflicts.append({
+                'task_id': task_id,
+                'type': 'double_booking',
+                'message': f"任务 {task_id} 被多个班组同时安排: {crews}"
+            })
+
+    return conflicts
+
+
+def detect_overload(schedule_df, crews_df=None):
+    if schedule_df is None or schedule_df.empty:
+        return []
+
+    if crews_df is None or crews_df.empty:
+        crews_df = initialize_crews()
+
+    overloads = []
+
+    for crew_id, group in schedule_df.groupby('班组编号'):
+        crew_info = crews_df[crews_df['crew_id'] == crew_id].iloc[0]
+        crew_type = crew_info['crew_type']
+        type_info = CREW_TYPES.get(crew_type, CREW_TYPES['INSPECTION'])
+
+        total_duration = group['预估时长(分钟)'].sum()
+        total_distance = group['预估行程(km)'].sum()
+        task_count = len(group)
+
+        if total_duration / 60 > 9:
+            overloads.append({
+                'crew_id': crew_id,
+                'crew_name': group.iloc[0]['班组名称'],
+                'type': 'time_overload',
+                'severity': 'high' if total_duration / 60 > 10 else 'medium',
+                'message': f"工作时长 {total_duration / 60:.1f} 小时，超过负荷",
+                'value': round(total_duration / 60, 1),
+                'threshold': 8
+            })
+
+        if total_distance > type_info['max_daily_distance'] * 1.2:
+            overloads.append({
+                'crew_id': crew_id,
+                'crew_name': group.iloc[0]['班组名称'],
+                'type': 'distance_overload',
+                'severity': 'high' if total_distance > type_info['max_daily_distance'] * 1.5 else 'medium',
+                'message': f"行驶距离 {total_distance:.1f} km，超过最大距离 {type_info['max_daily_distance']} km",
+                'value': round(total_distance, 1),
+                'threshold': type_info['max_daily_distance']
+            })
+
+        if task_count > type_info['max_daily_tasks']:
+            overloads.append({
+                'crew_id': crew_id,
+                'crew_name': group.iloc[0]['班组名称'],
+                'type': 'task_overload',
+                'severity': 'medium',
+                'message': f"任务数量 {task_count} 个，超过最大任务数 {type_info['max_daily_tasks']}",
+                'value': task_count,
+                'threshold': type_info['max_daily_tasks']
+            })
+
+    return overloads
+
+
+def reassign_task(schedule_df, task_id, from_crew, to_crew, schedule_date=None):
+    if schedule_df is None or schedule_df.empty:
+        return schedule_df, None
+
+    if schedule_date is None:
+        schedule_date = datetime.now().date()
+
+    task_mask = (schedule_df['任务编号'] == task_id) & \
+                (schedule_df['班组编号'] == from_crew) & \
+                (schedule_df['计划日期'] == schedule_date)
+
+    if not task_mask.any():
+        return schedule_df, {'error': '未找到指定任务'}
+
+    task = schedule_df[task_mask].iloc[0]
+    old_sequence = task['顺序']
+
+    to_crew_tasks = schedule_df[(schedule_df['班组编号'] == to_crew) &
+                                (schedule_df['计划日期'] == schedule_date)].copy()
+    new_sequence = len(to_crew_tasks) + 1
+
+    schedule_df.loc[task_mask, '班组编号'] = to_crew
+    schedule_df.loc[task_mask, '班组名称'] = schedule_df[schedule_df['班组编号'] == to_crew]['班组名称'].iloc[0] \
+        if any(schedule_df['班组编号'] == to_crew) else '新班组'
+    schedule_df.loc[task_mask, '顺序'] = new_sequence
+    schedule_df.loc[task_mask, '备注'] = f"从 {from_crew} 改派，原顺序 {old_sequence}"
+
+    from_crew_remaining = schedule_df[(schedule_df['班组编号'] == from_crew) &
+                                     (schedule_df['计划日期'] == schedule_date) &
+                                     (schedule_df['任务编号'] != task_id)].sort_values('顺序')
+
+    for i, (idx, _) in enumerate(from_crew_remaining.iterrows(), 1):
+        schedule_df.loc[idx, '顺序'] = i
+
+    return schedule_df, {'success': True, 'from_crew': from_crew, 'to_crew': to_crew, 'task_id': task_id}
+
+
+def merge_nearby_tasks(schedule_df, distance_threshold=1.0, time_threshold=30):
+    if schedule_df is None or schedule_df.empty or len(schedule_df) < 2:
+        return schedule_df, []
+
+    merged = []
+    merge_suggestions = []
+
+    for crew_id, group in schedule_df.groupby(['班组编号', '计划日期']):
+        group = group.sort_values('顺序').reset_index(drop=True)
+
+        i = 0
+        while i < len(group) - 1:
+            task1 = group.iloc[i]
+            task2 = group.iloc[i + 1]
+
+            loc1 = get_location_coords(task1['片区'], task1['管段编号'])
+            loc2 = get_location_coords(task2['片区'], task2['管段编号'])
+            dist = calculate_distance(loc1, loc2)
+
+            time_diff = abs(task1['预估时长(分钟)'] - task2['预估时长(分钟)'])
+
+            if dist <= distance_threshold and task1['任务类型'] == task2['任务类型']:
+                merge_suggestions.append({
+                    'crew_id': crew_id[0],
+                    'crew_name': task1['班组名称'],
+                    'task1_id': task1['任务编号'],
+                    'task2_id': task2['任务编号'],
+                    'distance': dist,
+                    'estimated_saving_minutes': time_diff + dist * 3,
+                    'merged_pipe_ids': f"{task1['管段编号']}、{task2['管段编号']}"
+                })
+                i += 2
+            else:
+                i += 1
+
+    return schedule_df, merge_suggestions
+
+
+def update_schedule_status(schedule_df, task_id, action, actual_time=None, notes=''):
+    if schedule_df is None or schedule_df.empty:
+        return schedule_df, None
+
+    mask = schedule_df['任务编号'] == task_id
+    if not mask.any():
+        return schedule_df, {'error': '未找到任务'}
+
+    now = datetime.now()
+    if actual_time is None:
+        actual_time = now
+
+    if action == 'start':
+        schedule_df.loc[mask, '实际开始时间'] = actual_time
+        schedule_df.loc[mask, '执行状态'] = '进行中'
+        schedule_df.loc[mask, '计划状态'] = '执行中'
+    elif action == 'complete':
+        schedule_df.loc[mask, '实际完成时间'] = actual_time
+        schedule_df.loc[mask, '执行状态'] = '已完成'
+        schedule_df.loc[mask, '计划状态'] = '已完成'
+
+        planned_end = schedule_df.loc[mask, '预计完成时间'].iloc[0]
+        if pd.notna(planned_end):
+            deviation = (actual_time - planned_end).total_seconds() / 60
+            schedule_df.loc[mask, '执行偏差(分钟)'] = round(deviation, 1)
+
+        actual_start = schedule_df.loc[mask, '实际开始时间'].iloc[0]
+        if pd.notna(actual_start):
+            actual_duration = (actual_time - actual_start).total_seconds() / 60
+            planned_duration = schedule_df.loc[mask, '预估时长(分钟)'].iloc[0]
+            schedule_df.loc[mask, '执行偏差(分钟)'] = round(actual_duration - planned_duration, 1)
+
+    if notes:
+        schedule_df.loc[mask, '备注'] = notes
+
+    return schedule_df, {'success': True, 'action': action, 'task_id': task_id}
+
+
+def calculate_crew_performance(schedule_df, tasks_df, start_date=None, end_date=None):
+    if schedule_df is None or schedule_df.empty:
+        return pd.DataFrame(), {}
+
+    df = schedule_df.copy()
+
+    if start_date:
+        df = df[df['计划日期'] >= start_date]
+    if end_date:
+        df = df[df['计划日期'] <= end_date]
+
+    if df.empty:
+        return pd.DataFrame(), {}
+
+    performance = []
+
+    for crew_id, group in df.groupby('班组编号'):
+        total_tasks = len(group)
+        completed_tasks = len(group[group['执行状态'] == '已完成'])
+        in_progress_tasks = len(group[group['执行状态'] == '进行中'])
+
+        completed = group[group['执行状态'] == '已完成']
+        deviations = completed['执行偏差(分钟)'].infer_objects(copy=False).fillna(0)
+        on_time = len(completed[deviations <= 15])
+        late = len(completed[deviations > 15])
+
+        avg_deviation = completed['执行偏差(分钟)'].mean() if not completed.empty else 0
+        total_distance = group['预估行程(km)'].sum()
+
+        deviation_stats = {}
+        if not completed.empty:
+            deviations = completed['执行偏差(分钟)'].dropna()
+            if not deviations.empty:
+                deviation_stats = {
+                    'avg_deviation': round(deviations.mean(), 1),
+                    'max_deviation': round(deviations.max(), 1),
+                    'min_deviation': round(deviations.min(), 1),
+                    'std_deviation': round(deviations.std(), 1)
+                }
+
+        performance.append({
+            '班组编号': crew_id,
+            '班组名称': group.iloc[0]['班组名称'],
+            '班组类型': group.iloc[0]['班组类型'],
+            '统计周期任务数': total_tasks,
+            '已完成任务数': completed_tasks,
+            '进行中任务数': in_progress_tasks,
+            '待执行任务数': len(group[group['执行状态'] == '未开始']),
+            '完成率': round(completed_tasks / total_tasks, 4) if total_tasks > 0 else 0,
+            '准时完成数': on_time,
+            '延误完成数': late,
+            '准时率': round(on_time / completed_tasks, 4) if completed_tasks > 0 else 0,
+            '平均偏差(分钟)': round(avg_deviation, 1),
+            '总行程(km)': round(total_distance, 2),
+            '平均每日任务数': round(total_tasks / group['计划日期'].nunique(), 1),
+            **deviation_stats
+        })
+
+    perf_df = pd.DataFrame(performance)
+
+    overall = {
+        'total_crews': len(perf_df),
+        'total_tasks': df['任务编号'].nunique(),
+        'total_completed': len(df[df['执行状态'] == '已完成']),
+        'overall_completion_rate': round(len(df[df['执行状态'] == '已完成']) / len(df), 4) if len(df) > 0 else 0,
+        'overall_on_time_rate': round(perf_df['准时完成数'].sum() / perf_df['已完成任务数'].sum(), 4) if perf_df['已完成任务数'].sum() > 0 else 0,
+        'avg_deviation_all': round(df[df['执行状态'] == '已完成']['执行偏差(分钟)'].mean(), 1) if not df[df['执行状态'] == '已完成'].empty else 0
+    }
+
+    return perf_df, overall
+
+
+def calculate_schedule_deviation_analysis(schedule_df, tasks_df):
+    if schedule_df is None or schedule_df.empty:
+        return pd.DataFrame(), {}
+
+    completed = schedule_df[schedule_df['执行状态'] == '已完成'].copy()
+
+    if completed.empty:
+        return pd.DataFrame(), {'error': '暂无已完成的计划数据'}
+
+    completed['日期'] = completed['计划日期']
+    deviations = completed['执行偏差(分钟)'].infer_objects(copy=False).fillna(0)
+    completed['偏差分类'] = pd.cut(
+        deviations,
+        bins=[-float('inf'), -15, 0, 15, 30, float('inf')],
+        labels=['大幅提前', '小幅提前', '准时', '小幅延误', '大幅延误']
+    )
+
+    daily_stats = completed.groupby('日期').agg({
+        '任务编号': 'count',
+        '执行偏差(分钟)': ['mean', 'std', 'max', 'min'],
+        '预估时长(分钟)': 'sum'
+    }).round(2)
+    daily_stats.columns = ['任务数', '平均偏差', '偏差标准差', '最大偏差', '最小偏差', '总预估时长']
+    daily_stats = daily_stats.reset_index()
+
+    by_priority = completed.groupby('动态优先级').agg({
+        '任务编号': 'count',
+        '执行偏差(分钟)': ['mean', 'std']
+    }).round(2)
+    by_priority.columns = ['任务数', '平均偏差', '偏差标准差']
+    by_priority = by_priority.reset_index()
+
+    by_crew_type = completed.groupby('班组类型').agg({
+        '任务编号': 'count',
+        '执行偏差(分钟)': ['mean', 'std']
+    }).round(2)
+    by_crew_type.columns = ['任务数', '平均偏差', '偏差标准差']
+    by_crew_type = by_crew_type.reset_index()
+
+    deviation_dist = completed['偏差分类'].value_counts().to_dict()
+
+    root_causes = []
+    if deviation_dist.get('大幅延误', 0) > 0:
+        major_delays = completed[completed['偏差分类'] == '大幅延误']
+        for _, row in major_delays.iterrows():
+            root_causes.append({
+                '任务编号': row['任务编号'],
+                '班组': row['班组名称'],
+                '偏差(分钟)': row['执行偏差(分钟)'],
+                '预估时长': row['预估时长(分钟)'],
+                '优先级': row['动态优先级'],
+                '可能原因': _analyze_deviation_cause(row, tasks_df)
+            })
+
+    analysis = {
+        'total_completed': len(completed),
+        'deviation_distribution': deviation_dist,
+        'on_time_rate': round(deviation_dist.get('准时', 0) / len(completed), 4),
+        'delay_rate': round((deviation_dist.get('小幅延误', 0) + deviation_dist.get('大幅延误', 0)) / len(completed), 4),
+        'avg_deviation': round(completed['执行偏差(分钟)'].mean(), 1),
+        'daily_stats': daily_stats.to_dict('records') if not daily_stats.empty else [],
+        'by_priority': by_priority.to_dict('records') if not by_priority.empty else [],
+        'by_crew_type': by_crew_type.to_dict('records') if not by_crew_type.empty else [],
+        'major_deviations': root_causes
+    }
+
+    return completed, analysis
+
+
+def _analyze_deviation_cause(schedule_row, tasks_df):
+    if tasks_df is None or tasks_df.empty:
+        return '未知原因'
+
+    task = tasks_df[tasks_df['任务编号'] == schedule_row['任务编号']]
+    if task.empty:
+        return '任务信息缺失'
+
+    task = task.iloc[0]
+    causes = []
+
+    depth = task.get('最新淤积深度(mm)', 0)
+    if depth > 400:
+        causes.append('淤积较深，清淤难度大')
+
+    diameter = task.get('管径(mm)', 500)
+    if diameter < 400:
+        causes.append('管径较小，作业空间有限')
+
+    planned = schedule_row['预估时长(分钟)']
+    actual = schedule_row['执行偏差(分钟)'] + planned
+    if actual > planned * 2:
+        causes.append('预估时长严重不足')
+
+    priority = schedule_row['动态优先级']
+    if priority in ['紧急', '高']:
+        causes.append('高优先级任务，可能受前置作业影响')
+
+    return '；'.join(causes) if causes else '作业复杂度超预期'
+
+
+def sync_schedule_with_tasks(schedule_df, tasks_df):
+    if schedule_df is None or schedule_df.empty or tasks_df is None or tasks_df.empty:
+        return tasks_df
+
+    for _, sched_row in schedule_df.iterrows():
+        task_id = sched_row['任务编号']
+        mask = tasks_df['任务编号'] == task_id
+
+        if not mask.any():
+            continue
+
+        if sched_row['执行状态'] == '进行中':
+            if pd.notna(sched_row['实际开始时间']):
+                tasks_df.loc[mask, '任务状态'] = '处理中'
+                tasks_df.loc[mask, '任务状态编码'] = 'IN_PROGRESS'
+                tasks_df.loc[mask, '处理开始时间'] = sched_row['实际开始时间']
+                tasks_df.loc[mask, '处理人员'] = sched_row['班组名称']
+
+        elif sched_row['执行状态'] == '已完成':
+            if pd.notna(sched_row['实际完成时间']):
+                task_row = tasks_df[mask].iloc[0]
+                if task_row['任务状态编码'] != 'COMPLETED':
+                    tasks_df.loc[mask, '任务状态'] = '已完成'
+                    tasks_df.loc[mask, '任务状态编码'] = 'COMPLETED'
+                    tasks_df.loc[mask, '处理完成时间'] = sched_row['实际完成时间']
+                    tasks_df.loc[mask, '处理人员'] = sched_row['班组名称']
+                    tasks_df.loc[mask, '处理结果'] = '按计划完成'
+                    tasks_df.loc[mask, '处理备注'] = sched_row.get('备注', '')
+
+    return tasks_df
+
+
+def get_crew_workload(schedule_df, crew_id, date=None):
+    if schedule_df is None or schedule_df.empty:
+        return {}
+
+    df = schedule_df[schedule_df['班组编号'] == crew_id].copy()
+
+    if date:
+        df = df[df['计划日期'] == date]
+
+    if df.empty:
+        return {'crew_id': crew_id, 'workload': 0, 'status': 'idle'}
+
+    total_duration = df['预估时长(分钟)'].sum()
+    total_tasks = len(df)
+    completed_tasks = len(df[df['执行状态'] == '已完成'])
+
+    workload_ratio = min(total_duration / 480, 1.0)
+
+    if workload_ratio >= 0.9:
+        status = 'overloaded'
+    elif workload_ratio >= 0.7:
+        status = 'busy'
+    elif workload_ratio >= 0.3:
+        status = 'normal'
+    else:
+        status = 'light'
+
+    return {
+        'crew_id': crew_id,
+        'crew_name': df.iloc[0]['班组名称'],
+        'date': date,
+        'total_tasks': total_tasks,
+        'completed_tasks': completed_tasks,
+        'in_progress_tasks': len(df[df['执行状态'] == '进行中']),
+        'total_duration_minutes': round(total_duration, 1),
+        'total_distance_km': round(df['预估行程(km)'].sum(), 2),
+        'workload_ratio': round(workload_ratio, 4),
+        'status': status,
+        'status_text': {'overloaded': '超负荷', 'busy': '繁忙', 'normal': '正常', 'light': '轻松', 'idle': '空闲'}[status]
+    }

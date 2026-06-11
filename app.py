@@ -39,7 +39,20 @@ from data_processor import (
     close_task,
     refresh_all_task_status,
     calculate_task_statistics,
-    compare_before_after
+    compare_before_after,
+    initialize_crews,
+    generate_daily_schedule,
+    detect_schedule_conflicts,
+    detect_overload,
+    reassign_task,
+    merge_nearby_tasks,
+    update_schedule_status,
+    calculate_crew_performance,
+    calculate_schedule_deviation_analysis,
+    sync_schedule_with_tasks,
+    get_crew_workload,
+    CREW_TYPES,
+    DEFAULT_CREWS
 )
 from visualizations import (
     create_pipe_history_chart,
@@ -68,7 +81,12 @@ GLOBAL_DATA = {
     'has_district': False,
     'custom_rules': None,
     'tasks_df': pd.DataFrame(),
-    'selected_task_id': None
+    'selected_task_id': None,
+    'crews_df': pd.DataFrame(),
+    'schedule_df': pd.DataFrame(),
+    'unassigned_df': pd.DataFrame(),
+    'schedule_summary': {},
+    'selected_schedule_id': None
 }
 
 HEADER_STYLE = {
@@ -902,6 +920,187 @@ app.layout = dbc.Container([
                         ], style=CARD_STYLE)
                     ])
                 ])
+            ]),
+
+            dbc.Tab(label='🗺️ 巡检路线优化与资源调度', tab_id='tab-schedule', children=[
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Card([
+                            dbc.CardHeader('📅 调度计划生成配置',
+                                           style={'fontWeight': 'bold', 'background': '#e8f4f8', 'fontSize': '16px'}),
+                            dbc.CardBody([
+                                dbc.Row([
+                                    dbc.Col([
+                                        html.Label('计划日期:',
+                                                   style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                                        dcc.DatePickerSingle(
+                                            id='schedule-date',
+                                            date=datetime.now().date(),
+                                            display_format='YYYY-MM-DD',
+                                            style={'width': '100%', 'height': '36px'}
+                                        )
+                                    ], md=2),
+                                    dbc.Col([
+                                        html.Label('任务类型筛选:',
+                                                   style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                                        dcc.Dropdown(
+                                            id='schedule-type-filter',
+                                            options=[
+                                                {'label': '全部类型', 'value': 'ALL'},
+                                                {'label': '巡检', 'value': '巡检'},
+                                                {'label': '复检', 'value': '复检'},
+                                                {'label': '清淤', 'value': '清淤'}
+                                            ],
+                                            value='ALL',
+                                            clearable=False
+                                        )
+                                    ], md=2),
+                                    dbc.Col([
+                                        html.Label('片区筛选:',
+                                                   style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                                        dcc.Dropdown(id='schedule-district-filter', placeholder='全部片区',
+                                                     clearable=True, multi=True)
+                                    ], md=2),
+                                    dbc.Col([
+                                        html.Div([
+                                            dbc.ButtonGroup([
+                                                dbc.Button('🔄 自动生成计划', id='btn-generate-schedule',
+                                                           color='primary', size='md',
+                                                           style={'marginTop': '25px', 'width': '100%'}),
+                                                dbc.Button('📊 冲突与负荷检测', id='btn-check-conflicts',
+                                                           color='warning', size='md',
+                                                           style={'marginTop': '25px', 'width': '100%'})
+                                            ], style={'width': '100%'})
+                                        ])
+                                    ], md=3),
+                                    dbc.Col([
+                                        html.Div([
+                                            dbc.ButtonGroup([
+                                                dbc.Button('🔄 同步任务状态', id='btn-sync-schedule-tasks',
+                                                           color='info', size='md',
+                                                           style={'marginTop': '25px', 'width': '100%'}),
+                                                dbc.Button('📋 班组管理', id='btn-manage-crews',
+                                                           color='secondary', size='md',
+                                                           style={'marginTop': '25px', 'width': '100%'})
+                                            ], style={'width': '100%'})
+                                        ])
+                                    ], md=3)
+                                ], style={'marginBottom': '10px'}),
+                                html.Div(id='schedule-generate-status', style={'marginBottom': '5px'})
+                            ])
+                        ], style=CARD_STYLE)
+                    ], width=12)
+                ]),
+
+                dbc.Row([
+                    dbc.Col(md=3, children=[
+                        dbc.Card([
+                            dbc.CardHeader('👥 班组与负荷概览',
+                                           style={'fontWeight': 'bold', 'background': '#eaf2f8'}),
+                            dbc.CardBody([
+                                html.Div(id='crew-workload-cards', style={'marginBottom': '10px'}),
+                                html.Div(id='schedule-warnings-panel')
+                            ])
+                        ], style=CARD_STYLE)
+                    ]),
+                    dbc.Col(md=9, children=[
+                        dbc.Card([
+                            dbc.CardHeader('📋 每日巡检/清淤执行计划',
+                                           style={'fontWeight': 'bold', 'background': '#fdf2e9'}),
+                            dbc.CardBody([
+                                dbc.Row([
+                                    dbc.Col(md=2, children=[
+                                        html.Label('班组筛选:',
+                                                   style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                                        dcc.Dropdown(id='schedule-crew-filter', placeholder='全部班组',
+                                                     clearable=True)
+                                    ]),
+                                    dbc.Col(md=2, children=[
+                                        html.Label('执行状态:',
+                                                   style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                                        dcc.Dropdown(
+                                            id='schedule-status-filter',
+                                            options=[
+                                                {'label': '全部状态', 'value': 'ALL'},
+                                                {'label': '未开始', 'value': '未开始'},
+                                                {'label': '进行中', 'value': '进行中'},
+                                                {'label': '已完成', 'value': '已完成'}
+                                            ],
+                                            value='ALL', clearable=False
+                                        )
+                                    ]),
+                                    dbc.Col(md=4, children=[
+                                        html.Label('批量操作:',
+                                                   style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                                        dbc.ButtonGroup([
+                                            dbc.Button('✏️ 任务改派', id='btn-reassign-task',
+                                                       color='primary', size='sm', className='me-1'),
+                                            dbc.Button('🔗 顺路合并建议', id='btn-merge-suggestions',
+                                                       color='success', size='sm', className='me-1'),
+                                            dbc.Button('▶️ 开始执行', id='btn-start-schedule-task',
+                                                       color='info', size='sm', className='me-1'),
+                                            dbc.Button('✅ 完成任务', id='btn-complete-schedule-task',
+                                                       color='success', size='sm')
+                                        ], style={'marginTop': '25px'})
+                                    ]),
+                                    dbc.Col(md=4, children=[
+                                        html.Div(id='schedule-summary-stats',
+                                                 style={'marginTop': '25px', 'fontSize': '13px'})
+                                    ])
+                                ], style={'marginBottom': '12px'}),
+                                html.Div(id='schedule-table')
+                            ])
+                        ], style=CARD_STYLE)
+                    ])
+                ]),
+
+                dbc.Row([
+                    dbc.Col(md=6, children=[
+                        dbc.Card([
+                            dbc.CardHeader('📈 班组绩效统计',
+                                           style={'fontWeight': 'bold', 'background': '#f5eef8'}),
+                            dbc.CardBody([
+                                dbc.Row([
+                                    dbc.Col([
+                                        html.Label('统计周期:',
+                                                   style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                                        dcc.DatePickerRange(
+                                            id='performance-date-range',
+                                            start_date=datetime.now().date() - pd.Timedelta(days=7),
+                                            end_date=datetime.now().date(),
+                                            display_format='YYYY-MM-DD'
+                                        )
+                                    ])
+                                ], style={'marginBottom': '10px'}),
+                                html.Div(id='crew-performance-table'),
+                                dcc.Graph(id='crew-performance-chart')
+                            ])
+                        ], style=CARD_STYLE)
+                    ]),
+                    dbc.Col(md=6, children=[
+                        dbc.Card([
+                            dbc.CardHeader('📊 计划执行偏差分析',
+                                           style={'fontWeight': 'bold', 'background': '#e8f8f5'}),
+                            dbc.CardBody([
+                                html.Div(id='deviation-analysis-summary', style={'marginBottom': '10px'}),
+                                dcc.Graph(id='deviation-distribution-chart'),
+                                html.Div(id='major-deviations-table')
+                            ])
+                        ], style=CARD_STYLE)
+                    ])
+                ]),
+
+                dbc.Row([
+                    dbc.Col(md=12, children=[
+                        dbc.Card([
+                            dbc.CardHeader('🗺️ 甘特图 - 班组每日路线安排',
+                                           style={'fontWeight': 'bold', 'background': '#eaf2f8'}),
+                            dbc.CardBody([
+                                dcc.Graph(id='schedule-gantt-chart', style={'height': '400px'})
+                            ])
+                        ], style=CARD_STYLE)
+                    ])
+                ])
             ])
         ], id='main-tabs', active_tab='tab-single', style={'marginBottom': '20px'})
     ]),
@@ -915,7 +1114,10 @@ app.layout = dbc.Container([
     dcc.Store(id='save-signal', data=0),
     dcc.Store(id='risk-rules-store', data=None),
     dcc.Store(id='task-signal', data=0),
-    dcc.Store(id='selected-tasks-store', data=[])
+    dcc.Store(id='selected-tasks-store', data=[]),
+    dcc.Store(id='schedule-signal', data=0),
+    dcc.Store(id='selected-schedule-tasks-store', data=[]),
+    dcc.Store(id='crew-signal', data=0)
 
 ], fluid=True, style={'padding': '20px', 'backgroundColor': '#f5f6fa', 'minHeight': '100vh'})
 
@@ -2561,6 +2763,850 @@ def handle_batch_operations(assign_clicks, close_clicks, delete_clicks,
 
     GLOBAL_DATA['tasks_df'] = tasks_df
     return dbc.Alert(msg, color='success' if count > 0 else 'info', duration=5000), new_signal
+
+
+@callback(
+    [Output('schedule-district-filter', 'options'),
+     Output('schedule-crew-filter', 'options')],
+    [Input('district-filter', 'value'),
+     Input('crew-signal', 'data'),
+     Input('schedule-signal', 'data')],
+    [State('district-filter', 'options')]
+)
+def update_schedule_filters(district, crew_signal, schedule_signal, district_options):
+    if GLOBAL_DATA['valid_df'].empty:
+        return [], []
+
+    districts = get_districts(GLOBAL_DATA['valid_df'])
+    district_opts = [{'label': d, 'value': d} for d in districts]
+
+    if GLOBAL_DATA['crews_df'].empty:
+        GLOBAL_DATA['crews_df'] = initialize_crews()
+
+    crew_opts = []
+    if not GLOBAL_DATA['crews_df'].empty:
+        for _, row in GLOBAL_DATA['crews_df'].iterrows():
+            crew_opts.append({
+                'label': f"{row['crew_name']} ({CREW_TYPES.get(row['crew_type'], {}).get('name', row['crew_type'])})",
+                'value': row['crew_id']
+            })
+
+    return district_opts, crew_opts
+
+
+@callback(
+    [Output('schedule-generate-status', 'children'),
+     Output('schedule-signal', 'data', allow_duplicate=True),
+     Output('schedule-district-filter', 'value')],
+    [Input('btn-generate-schedule', 'n_clicks')],
+    [State('schedule-date', 'date'),
+     State('schedule-type-filter', 'value'),
+     State('schedule-district-filter', 'value'),
+     State('task-signal', 'data'),
+     State('schedule-signal', 'data'),
+     State('risk-rules-store', 'data')],
+    prevent_initial_call=True
+)
+def handle_generate_schedule(n_clicks, schedule_date, type_filter, district_filter,
+                             task_signal, current_signal, rules_data):
+    if not n_clicks:
+        return dash.no_update, dash.no_update, dash.no_update
+
+    tasks_df = GLOBAL_DATA['tasks_df']
+    if tasks_df.empty:
+        return dbc.Alert('请先生成任务！点击"任务编排与闭环处置"标签页中的"自动生成任务"按钮',
+                         color='warning', duration=5000), dash.no_update, dash.no_update
+
+    include_types = None
+    if type_filter and type_filter != 'ALL':
+        include_types = [type_filter]
+
+    schedule_date_parsed = pd.to_datetime(schedule_date).date()
+
+    filtered_tasks = tasks_df.copy()
+    if district_filter:
+        filtered_tasks = filtered_tasks[filtered_tasks['片区'].isin(district_filter)]
+
+    if GLOBAL_DATA['crews_df'].empty:
+        GLOBAL_DATA['crews_df'] = initialize_crews()
+
+    schedule_df, unassigned_df, summary = generate_daily_schedule(
+        filtered_tasks,
+        crews_df=GLOBAL_DATA['crews_df'],
+        schedule_date=schedule_date_parsed,
+        include_types=include_types,
+        rules=rules_data
+    )
+
+    GLOBAL_DATA['schedule_df'] = schedule_df
+    GLOBAL_DATA['unassigned_df'] = unassigned_df
+    GLOBAL_DATA['schedule_summary'] = summary
+
+    new_signal = (current_signal + 1) if current_signal else 1
+
+    warning_alerts = []
+    warnings = summary.get('warnings', [])
+    for w in warnings:
+        if w.get('type') == 'overload':
+            warning_alerts.append(dbc.Alert(w['message'], color='warning', duration=6000))
+        elif w.get('type') == 'unassigned':
+            warning_alerts.append(dbc.Alert(w['message'], color='info', duration=6000))
+        elif w.get('type') in ['time_conflict', 'double_booking']:
+            warning_alerts.append(dbc.Alert(w['message'], color='danger', duration=6000))
+
+    status_msg = html.Div([
+        dbc.Alert([
+            html.Strong(f"✅ 成功生成计划！"),
+            html.Span(f" 共安排 {summary.get('total_tasks_scheduled', 0)} 个任务，"
+                      f"使用 {summary.get('crews_used', 0)} 个班组，"
+                      f"未安排 {summary.get('total_tasks_unassigned', 0)} 个任务。")
+        ], color='success', duration=5000),
+        html.Div(warning_alerts)
+    ])
+
+    return status_msg, new_signal, dash.no_update
+
+
+@callback(
+    [Output('schedule-table', 'children'),
+     Output('schedule-summary-stats', 'children'),
+     Output('crew-workload-cards', 'children'),
+     Output('schedule-warnings-panel', 'children')],
+    [Input('schedule-signal', 'data'),
+     Input('schedule-crew-filter', 'value'),
+     Input('schedule-status-filter', 'value'),
+     Input('btn-check-conflicts', 'n_clicks')],
+    [State('schedule-date', 'date')]
+)
+def update_schedule_display(schedule_signal, crew_filter, status_filter, check_clicks, schedule_date):
+    schedule_df = GLOBAL_DATA['schedule_df']
+    tasks_df = GLOBAL_DATA['tasks_df']
+
+    if schedule_df.empty:
+        return (
+            make_empty_msg('尚未生成调度计划，请点击上方"自动生成计划"按钮'),
+            '',
+            make_empty_msg('暂无班组数据'),
+            ''
+        )
+
+    display_df = schedule_df.copy()
+
+    if crew_filter:
+        display_df = display_df[display_df['班组编号'] == crew_filter]
+
+    if status_filter and status_filter != 'ALL':
+        display_df = display_df[display_df['执行状态'] == status_filter]
+
+    schedule_date_parsed = pd.to_datetime(schedule_date).date()
+    display_df = display_df[display_df['计划日期'] == schedule_date_parsed]
+
+    summary_html = ''
+    if not schedule_df.empty:
+        total = len(schedule_df[schedule_df['计划日期'] == schedule_date_parsed])
+        completed = len(schedule_df[(schedule_df['计划日期'] == schedule_date_parsed) &
+                                    (schedule_df['执行状态'] == '已完成')])
+        in_progress = len(schedule_df[(schedule_df['计划日期'] == schedule_date_parsed) &
+                                      (schedule_df['执行状态'] == '进行中')])
+        pending = len(schedule_df[(schedule_df['计划日期'] == schedule_date_parsed) &
+                                  (schedule_df['执行状态'] == '未开始')])
+        summary_html = html.Div([
+            html.Span(f"总任务: {total} | ", style={'marginRight': '15px'}),
+            html.Span(f"已完成: {completed} | ", style={'color': '#27ae60', 'marginRight': '15px'}),
+            html.Span(f"进行中: {in_progress} | ", style={'color': '#f39c12', 'marginRight': '15px'}),
+            html.Span(f"待执行: {pending}", style={'color': '#7f8c8d'})
+        ])
+
+    workload_cards = []
+    if GLOBAL_DATA['crews_df'].empty:
+        GLOBAL_DATA['crews_df'] = initialize_crews()
+
+    for _, crew_row in GLOBAL_DATA['crews_df'].iterrows():
+        if crew_row['status'] != 'ACTIVE':
+            continue
+        workload = get_crew_workload(schedule_df, crew_row['crew_id'], schedule_date_parsed)
+        status_colors = {
+            'overloaded': '#e74c3c', 'busy': '#e67e22',
+            'normal': '#27ae60', 'light': '#3498db', 'idle': '#95a5a6'
+        }
+        status_color = status_colors.get(workload.get('status', 'idle'), '#95a5a6')
+
+        workload_cards.append(html.Div([
+            html.Div([
+                html.Strong(workload.get('crew_name', crew_row['crew_name']),
+                           style={'display': 'block', 'fontSize': '13px'}),
+                html.Span(workload.get('status_text', '空闲'),
+                          style={'fontSize': '11px', 'color': status_color, 'fontWeight': 'bold'})
+            ], style={'marginBottom': '5px'}),
+            html.Div([
+                html.Div(style={
+                    'height': '8px',
+                    'background': '#ecf0f1',
+                    'borderRadius': '4px',
+                    'overflow': 'hidden'
+                }, children=[
+                    html.Div(style={
+                        'height': '100%',
+                        'width': f"{workload.get('workload_ratio', 0) * 100}%",
+                        'background': status_color,
+                        'transition': 'width 0.3s'
+                    })
+                ])
+            ], style={'marginBottom': '5px'}),
+            html.Div([
+                html.Small(f"{workload.get('total_tasks', 0)} 任务 / "
+                           f"{workload.get('total_duration_minutes', 0):.0f} 分钟 / "
+                           f"{workload.get('total_distance_km', 0):.1f} km")
+            ], style={'fontSize': '11px', 'color': '#7f8c8d'})
+        ], style={'padding': '10px', 'background': '#f8f9fa', 'borderRadius': '6px',
+                  'marginBottom': '10px', 'border': f'2px solid {status_color}30'}))
+
+    if not workload_cards:
+        workload_cards = [make_empty_msg('暂无活跃班组')]
+
+    warnings_html = ''
+    if check_clicks and not schedule_df.empty:
+        conflicts = detect_schedule_conflicts(schedule_df)
+        overloads = detect_overload(schedule_df, GLOBAL_DATA['crews_df'])
+        all_warnings = conflicts + overloads
+
+        if all_warnings:
+            warning_items = []
+            for w in all_warnings:
+                severity = w.get('severity', 'medium')
+                color = 'danger' if severity == 'high' or w.get('type') in ['time_conflict', 'double_booking'] else 'warning'
+                warning_items.append(dbc.Alert(w['message'], color=color, duration=0))
+            warnings_html = html.Div([
+                html.H6('⚠️ 冲突与预警', style={'fontWeight': 'bold', 'color': '#c0392b', 'marginBottom': '8px'}),
+                html.Div(warning_items)
+            ])
+        else:
+            warnings_html = dbc.Alert('✅ 未检测到冲突，所有班组负荷正常', color='success', duration=4000)
+
+    if display_df.empty:
+        return make_empty_msg('当前筛选条件下无计划数据'), summary_html, workload_cards, warnings_html
+
+    display_df = display_df.sort_values(['班组编号', '顺序']).reset_index(drop=True)
+
+    status_colors = {
+        '未开始': '#ecf0f1',
+        '进行中': '#f39c12',
+        '已完成': '#27ae60'
+    }
+
+    priority_colors = {
+        '紧急': '#e74c3c',
+        '高': '#e67e22',
+        '中': '#f39c12',
+        '低': '#27ae60'
+    }
+
+    def _fmt_time(t):
+        if pd.isna(t):
+            return '-'
+        return pd.to_datetime(t).strftime('%H:%M')
+
+    table_data = []
+    for _, row in display_df.iterrows():
+        table_data.append({
+            '选择': False,
+            '顺序': row['顺序'],
+            '班组': row['班组名称'],
+            '任务编号': row['任务编号'],
+            '管段编号': row['管段编号'],
+            '片区': row['片区'],
+            '任务类型': row['任务类型'],
+            '优先级': row['动态优先级'],
+            '优先级颜色': priority_colors.get(row['动态优先级'], '#95a5a6'),
+            '预计到达': _fmt_time(row['预计到达时间']),
+            '预计开始': _fmt_time(row['预计开始时间']),
+            '预计完成': _fmt_time(row['预计完成时间']),
+            '预估时长': f"{row['预估时长(分钟)']:.0f}分钟",
+            '预估行程': f"{row['预估行程(km)']:.1f}km",
+            '执行状态': row['执行状态'],
+            '状态颜色': status_colors.get(row['执行状态'], '#95a5a6'),
+            '执行偏差': f"{row['执行偏差(分钟)']:+.0f}分钟" if pd.notna(row['执行偏差(分钟)']) else '-',
+            '位置坐标': row['位置坐标']
+        })
+
+    schedule_table = dash_table.DataTable(
+        id='schedule-datatable',
+        data=table_data,
+        columns=[
+            {'id': '选择', 'name': '选择', 'type': 'numeric'},
+            {'id': '顺序', 'name': '顺序', 'width': '60px'},
+            {'id': '班组', 'name': '班组', 'width': '100px'},
+            {'id': '任务编号', 'name': '任务编号', 'width': '140px'},
+            {'id': '管段编号', 'name': '管段编号', 'width': '90px'},
+            {'id': '片区', 'name': '片区', 'width': '60px'},
+            {'id': '任务类型', 'name': '类型', 'width': '60px'},
+            {'id': '优先级', 'name': '优先级', 'width': '70px'},
+            {'id': '预计到达', 'name': '预计到达', 'width': '80px'},
+            {'id': '预计开始', 'name': '预计开始', 'width': '80px'},
+            {'id': '预计完成', 'name': '预计完成', 'width': '80px'},
+            {'id': '预估时长', 'name': '时长', 'width': '70px'},
+            {'id': '预估行程', 'name': '行程', 'width': '70px'},
+            {'id': '执行状态', 'name': '执行状态', 'width': '80px'},
+            {'id': '执行偏差', 'name': '偏差', 'width': '70px'}
+        ],
+        style_table={'overflowX': 'auto', 'maxHeight': '500px', 'overflowY': 'auto'},
+        style_header={
+            'backgroundColor': '#2c3e50',
+            'color': 'white',
+            'fontWeight': 'bold',
+            'fontSize': '12px',
+            'padding': '8px'
+        },
+        style_data_conditional=[
+            *[
+                {
+                    'if': {'filter_query': '{优先级} = "' + p + '"'},
+                    'color': c,
+                    'fontWeight': 'bold'
+                } for p, c in priority_colors.items()
+            ],
+            *[
+                {
+                    'if': {'filter_query': '{执行状态} = "' + s + '"'},
+                    'backgroundColor': c + '20'
+                } for s, c in status_colors.items()
+            ],
+            {
+                'if': {'filter_query': '{执行偏差} contains "-" && {执行偏差} != "-"'},
+                'color': '#27ae60'
+            },
+            {
+                'if': {'filter_query': '{执行偏差} contains "+"'},
+                'color': '#e74c3c'
+            }
+        ],
+        style_cell={'textAlign': 'center', 'padding': '6px', 'fontSize': '12px'},
+        page_size=20,
+        row_selectable='multi',
+        selected_rows=[],
+        editable=False
+    )
+
+    return schedule_table, summary_html, workload_cards, warnings_html
+
+
+@callback(
+    Output('selected-schedule-tasks-store', 'data'),
+    [Input('schedule-datatable', 'selected_rows')],
+    [State('schedule-datatable', 'data')]
+)
+def update_selected_schedule_tasks(selected_rows, table_data):
+    if not selected_rows or not table_data:
+        return []
+
+    selected_ids = [table_data[i]['任务编号'] for i in selected_rows if i < len(table_data)]
+    return selected_ids
+
+
+@callback(
+    [Output('schedule-generate-status', 'children', allow_duplicate=True),
+     Output('schedule-signal', 'data', allow_duplicate=True)],
+    [Input('btn-start-schedule-task', 'n_clicks'),
+     Input('btn-complete-schedule-task', 'n_clicks')],
+    [State('selected-schedule-tasks-store', 'data'),
+     State('schedule-signal', 'data')],
+    prevent_initial_call=True
+)
+def handle_schedule_status_updates(start_clicks, complete_clicks, selected_ids, current_signal):
+    triggered = ctx.triggered_id
+    schedule_df = GLOBAL_DATA['schedule_df']
+
+    if schedule_df.empty:
+        return dbc.Alert('暂无计划数据', color='warning', duration=4000), dash.no_update
+
+    if not selected_ids:
+        return dbc.Alert('请先从计划列表中选择要操作的任务', color='warning', duration=4000), dash.no_update
+
+    schedule_df = schedule_df.copy()
+    count = 0
+    action = 'start' if triggered == 'btn-start-schedule-task' else 'complete'
+
+    for task_id in selected_ids:
+        schedule_df, result = update_schedule_status(schedule_df, task_id, action)
+        if result and result.get('success'):
+            count += 1
+
+    if count == 0:
+        return dbc.Alert('没有找到可更新状态的任务', color='warning', duration=4000), dash.no_update
+
+    GLOBAL_DATA['schedule_df'] = schedule_df
+
+    tasks_df = GLOBAL_DATA['tasks_df']
+    if not tasks_df.empty:
+        GLOBAL_DATA['tasks_df'] = sync_schedule_with_tasks(schedule_df, tasks_df)
+
+    new_signal = (current_signal + 1) if current_signal else 1
+    action_text = '开始执行' if action == 'start' else '完成'
+    return dbc.Alert(f'✅ 已{action_text} {count} 个任务', color='success', duration=4000), new_signal
+
+
+@callback(
+    [Output('schedule-generate-status', 'children', allow_duplicate=True),
+     Output('schedule-signal', 'data', allow_duplicate=True)],
+    [Input('btn-reassign-task', 'n_clicks')],
+    [State('selected-schedule-tasks-store', 'data'),
+     State('schedule-crew-filter', 'value'),
+     State('schedule-date', 'date'),
+     State('schedule-signal', 'data')],
+    prevent_initial_call=True
+)
+def handle_reassign_task(n_clicks, selected_ids, to_crew, schedule_date, current_signal):
+    if not n_clicks or not selected_ids:
+        return dash.no_update, dash.no_update
+
+    if not to_crew:
+        return dbc.Alert('请先选择目标班组', color='warning', duration=4000), dash.no_update
+
+    schedule_df = GLOBAL_DATA['schedule_df']
+    if schedule_df.empty:
+        return dbc.Alert('暂无计划数据', color='warning', duration=4000), dash.no_update
+
+    schedule_date_parsed = pd.to_datetime(schedule_date).date()
+    schedule_df = schedule_df.copy()
+    count = 0
+
+    for task_id in selected_ids:
+        task_row = schedule_df[(schedule_df['任务编号'] == task_id) &
+                               (schedule_df['计划日期'] == schedule_date_parsed)]
+        if task_row.empty:
+            continue
+        from_crew = task_row.iloc[0]['班组编号']
+        if from_crew == to_crew:
+            continue
+        schedule_df, result = reassign_task(schedule_df, task_id, from_crew, to_crew, schedule_date_parsed)
+        if result and result.get('success'):
+            count += 1
+
+    if count == 0:
+        return dbc.Alert('没有可改派的任务（可能已在目标班组）', color='warning', duration=4000), dash.no_update
+
+    GLOBAL_DATA['schedule_df'] = schedule_df
+    new_signal = (current_signal + 1) if current_signal else 1
+    return dbc.Alert(f'✅ 已成功改派 {count} 个任务到目标班组', color='success', duration=4000), new_signal
+
+
+@callback(
+    Output('schedule-generate-status', 'children', allow_duplicate=True),
+    [Input('btn-merge-suggestions', 'n_clicks')],
+    [State('schedule-date', 'date')],
+    prevent_initial_call=True
+)
+def handle_merge_suggestions(n_clicks, schedule_date):
+    if not n_clicks:
+        return dash.no_update
+
+    schedule_df = GLOBAL_DATA['schedule_df']
+    if schedule_df.empty:
+        return dbc.Alert('暂无计划数据', color='warning', duration=4000), dash.no_update
+
+    schedule_date_parsed = pd.to_datetime(schedule_date).date()
+    filtered_df = schedule_df[schedule_df['计划日期'] == schedule_date_parsed]
+
+    _, suggestions = merge_nearby_tasks(filtered_df, distance_threshold=1.0)
+
+    if not suggestions:
+        return dbc.Alert('✅ 当前计划中没有发现可顺路合并的任务', color='info', duration=4000)
+
+    suggestion_alerts = [
+        dbc.Alert(
+            f"💡 建议合并: {s['merged_pipe_ids']} - "
+            f"距离 {s['distance']:.1f}km，预计可节省 {s['estimated_saving_minutes']:.0f} 分钟",
+            color='info',
+            duration=0
+        )
+        for s in suggestions
+    ]
+
+    return html.Div([
+        html.H6('🔗 顺路合并建议', style={'fontWeight': 'bold', 'color': '#2980b9', 'marginBottom': '10px'}),
+        html.Div(suggestion_alerts)
+    ])
+
+
+@callback(
+    [Output('schedule-generate-status', 'children', allow_duplicate=True),
+     Output('task-signal', 'data', allow_duplicate=True)],
+    [Input('btn-sync-schedule-tasks', 'n_clicks')],
+    [State('schedule-signal', 'data'),
+     State('task-signal', 'data')],
+    prevent_initial_call=True
+)
+def handle_sync_schedule_tasks(n_clicks, schedule_signal, current_task_signal):
+    if not n_clicks:
+        return dash.no_update, dash.no_update
+
+    schedule_df = GLOBAL_DATA['schedule_df']
+    tasks_df = GLOBAL_DATA['tasks_df']
+
+    if schedule_df.empty or tasks_df.empty:
+        return dbc.Alert('需要同时有计划数据和任务数据才能同步',
+                         color='warning', duration=4000), dash.no_update
+
+    updated_tasks = sync_schedule_with_tasks(schedule_df, tasks_df)
+    GLOBAL_DATA['tasks_df'] = updated_tasks
+
+    new_task_signal = (current_task_signal + 1) if current_task_signal else 1
+    return dbc.Alert('✅ 已成功将计划执行状态同步到任务系统',
+                     color='success', duration=4000), new_task_signal
+
+
+@callback(
+    [Output('crew-performance-table', 'children'),
+     Output('crew-performance-chart', 'figure')],
+    [Input('schedule-signal', 'data'),
+     Input('performance-date-range', 'start_date'),
+     Input('performance-date-range', 'end_date')]
+)
+def update_crew_performance(schedule_signal, start_date, end_date):
+    schedule_df = GLOBAL_DATA['schedule_df']
+    tasks_df = GLOBAL_DATA['tasks_df']
+
+    if schedule_df.empty:
+        return make_empty_msg('暂无计划数据，无法计算绩效'), make_empty_fig('暂无绩效数据')
+
+    start_parsed = pd.to_datetime(start_date).date() if start_date else None
+    end_parsed = pd.to_datetime(end_date).date() if end_date else None
+
+    perf_df, overall = calculate_crew_performance(
+        schedule_df, tasks_df, start_parsed, end_parsed
+    )
+
+    if perf_df.empty:
+        return make_empty_msg('统计周期内无执行数据'), make_empty_fig('暂无绩效数据')
+
+    perf_display = perf_df.copy()
+    perf_display['完成率'] = perf_display['完成率'].apply(lambda x: f"{x*100:.1f}%")
+    perf_display['准时率'] = perf_display['准时率'].apply(lambda x: f"{x*100:.1f}%")
+
+    perf_table = dash_table.DataTable(
+        data=perf_display.to_dict('records'),
+        columns=[
+            {'id': '班组名称', 'name': '班组'},
+            {'id': '班组类型', 'name': '类型'},
+            {'id': '统计周期任务数', 'name': '总任务'},
+            {'id': '已完成任务数', 'name': '已完成'},
+            {'id': '完成率', 'name': '完成率'},
+            {'id': '准时完成数', 'name': '准时数'},
+            {'id': '延误完成数', 'name': '延误数'},
+            {'id': '准时率', 'name': '准时率'},
+            {'id': '平均偏差(分钟)', 'name': '平均偏差(分)'},
+            {'id': '总行程(km)', 'name': '总行程(km)'}
+        ],
+        style_table={'overflowX': 'auto'},
+        style_header={
+            'backgroundColor': '#8e44ad',
+            'color': 'white',
+            'fontWeight': 'bold',
+            'fontSize': '12px'
+        },
+        style_cell={'textAlign': 'center', 'padding': '8px', 'fontSize': '12px'},
+        style_data_conditional=[
+            {
+                'if': {'column_id': '完成率'},
+                'color': '#27ae60',
+                'fontWeight': 'bold'
+            }
+        ]
+    )
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=perf_df['班组名称'],
+        y=perf_df['完成率'] * 100,
+        name='完成率(%)',
+        marker_color='#3498db',
+        yaxis='y'
+    ))
+    fig.add_trace(go.Scatter(
+        x=perf_df['班组名称'],
+        y=perf_df['准时率'] * 100,
+        name='准时率(%)',
+        mode='lines+markers',
+        line=dict(color='#e74c3c', width=2),
+        marker=dict(size=10),
+        yaxis='y'
+    ))
+    fig.add_trace(go.Bar(
+        x=perf_df['班组名称'],
+        y=perf_df['平均偏差(分钟)'],
+        name='平均偏差(分钟)',
+        marker_color='#f39c12',
+        yaxis='y2',
+        opacity=0.6
+    ))
+
+    fig.update_layout(
+        title='班组绩效对比',
+        template='plotly_white',
+        yaxis=dict(title='比率 (%)', side='left', range=[0, 100]),
+        yaxis2=dict(title='偏差 (分钟)', side='right', overlaying='y'),
+        legend=dict(orientation='h', y=-0.2),
+        margin=dict(l=50, r=50, t=50, b=50),
+        height=300
+    )
+
+    return perf_table, fig
+
+
+@callback(
+    [Output('deviation-analysis-summary', 'children'),
+     Output('deviation-distribution-chart', 'figure'),
+     Output('major-deviations-table', 'children')],
+    [Input('schedule-signal', 'data')]
+)
+def update_deviation_analysis(schedule_signal):
+    schedule_df = GLOBAL_DATA['schedule_df']
+    tasks_df = GLOBAL_DATA['tasks_df']
+
+    if schedule_df.empty:
+        return (
+            make_empty_msg('暂无已完成的计划数据'),
+            make_empty_fig('暂无偏差数据'),
+            ''
+        )
+
+    completed_df, analysis = calculate_schedule_deviation_analysis(schedule_df, tasks_df)
+
+    if completed_df.empty:
+        return (
+            make_empty_msg('暂无已完成的计划数据'),
+            make_empty_fig('暂无偏差数据'),
+            ''
+        )
+
+    summary_html = html.Div([
+        dbc.Row([
+            dbc.Col([
+                html.Div([
+                    html.Div('已完成任务', style={'fontSize': '12px', 'color': '#7f8c8d'}),
+                    html.Div(f"{analysis.get('total_completed', 0)}",
+                             style={'fontSize': '24px', 'fontWeight': 'bold', 'color': '#2c3e50'})
+                ], style={'textAlign': 'center', 'padding': '10px', 'background': '#f8f9fa',
+                          'borderRadius': '8px'})
+            ], md=3),
+            dbc.Col([
+                html.Div([
+                    html.Div('准时率', style={'fontSize': '12px', 'color': '#7f8c8d'}),
+                    html.Div(f"{analysis.get('on_time_rate', 0) * 100:.1f}%",
+                             style={'fontSize': '24px', 'fontWeight': 'bold', 'color': '#27ae60'})
+                ], style={'textAlign': 'center', 'padding': '10px', 'background': '#f8f9fa',
+                          'borderRadius': '8px'})
+            ], md=3),
+            dbc.Col([
+                html.Div([
+                    html.Div('延误率', style={'fontSize': '12px', 'color': '#7f8c8d'}),
+                    html.Div(f"{analysis.get('delay_rate', 0) * 100:.1f}%",
+                             style={'fontSize': '24px', 'fontWeight': 'bold', 'color': '#e74c3c'})
+                ], style={'textAlign': 'center', 'padding': '10px', 'background': '#f8f9fa',
+                          'borderRadius': '8px'})
+            ], md=3),
+            dbc.Col([
+                html.Div([
+                    html.Div('平均偏差', style={'fontSize': '12px', 'color': '#7f8c8d'}),
+                    html.Div(f"{analysis.get('avg_deviation', 0):+.1f}分钟",
+                             style={'fontSize': '24px', 'fontWeight': 'bold',
+                                    'color': '#27ae60' if analysis.get('avg_deviation', 0) < 0 else '#e67e22'})
+                ], style={'textAlign': 'center', 'padding': '10px', 'background': '#f8f9fa',
+                          'borderRadius': '8px'})
+            ], md=3)
+        ])
+    ])
+
+    dist = analysis.get('deviation_distribution', {})
+    labels = list(dist.keys())
+    values = list(dist.values())
+    colors = ['#3498db', '#2ecc71', '#27ae60', '#e67e22', '#e74c3c']
+
+    pie_fig = go.Figure(data=[go.Pie(
+        labels=labels,
+        values=values,
+        hole=0.5,
+        marker=dict(colors=colors),
+        textinfo='label+percent'
+    )])
+    pie_fig.update_layout(
+        title='执行偏差分布',
+        template='plotly_white',
+        height=300,
+        margin=dict(l=20, r=20, t=40, b=20)
+    )
+
+    major_deviations = analysis.get('major_deviations', [])
+    major_table = ''
+    if major_deviations:
+        major_df = pd.DataFrame(major_deviations)
+        major_table = html.Div([
+            html.H6('⚠️ 大幅延误任务分析', style={'fontWeight': 'bold', 'color': '#c0392b',
+                                                    'marginTop': '10px', 'marginBottom': '8px'}),
+            dash_table.DataTable(
+                data=major_df.to_dict('records'),
+                columns=[
+                    {'id': '任务编号', 'name': '任务编号'},
+                    {'id': '班组', 'name': '班组'},
+                    {'id': '偏差(分钟)', 'name': '偏差(分钟)'},
+                    {'id': '预估时长', 'name': '预估时长'},
+                    {'id': '优先级', 'name': '优先级'},
+                    {'id': '可能原因', 'name': '可能原因'}
+                ],
+                style_table={'overflowX': 'auto', 'maxHeight': '200px', 'overflowY': 'auto'},
+                style_header={
+                    'backgroundColor': '#c0392b',
+                    'color': 'white',
+                    'fontWeight': 'bold',
+                    'fontSize': '11px'
+                },
+                style_cell={'textAlign': 'left', 'padding': '6px', 'fontSize': '11px'},
+                style_data_conditional=[
+                    {
+                        'if': {'column_id': '偏差(分钟)'},
+                        'color': '#e74c3c',
+                        'fontWeight': 'bold'
+                    }
+                ]
+            )
+        ])
+
+    return summary_html, pie_fig, major_table
+
+
+@callback(
+    Output('schedule-gantt-chart', 'figure'),
+    [Input('schedule-signal', 'data'),
+     Input('schedule-crew-filter', 'value'),
+     Input('schedule-date', 'date')]
+)
+def update_gantt_chart(schedule_signal, crew_filter, schedule_date):
+    schedule_df = GLOBAL_DATA['schedule_df']
+
+    if schedule_df.empty:
+        return make_empty_fig('暂无计划数据')
+
+    schedule_date_parsed = pd.to_datetime(schedule_date).date()
+    display_df = schedule_df[schedule_df['计划日期'] == schedule_date_parsed].copy()
+
+    if crew_filter:
+        display_df = display_df[display_df['班组编号'] == crew_filter]
+
+    if display_df.empty:
+        return make_empty_fig('当前筛选条件下无计划数据')
+
+    display_df = display_df.sort_values(['班组编号', '顺序'])
+
+    fig = go.Figure()
+
+    crew_colors = {
+        'CREW_A': '#3498db',
+        'CREW_B': '#2ecc71',
+        'DREDGE_1': '#e74c3c',
+        'DREDGE_2': '#e67e22',
+        'MULTI_1': '#9b59b6'
+    }
+
+    status_opacity = {
+        '未开始': 0.5,
+        '进行中': 0.8,
+        '已完成': 1.0
+    }
+
+    for _, row in display_df.iterrows():
+        crew_id = row['班组编号']
+        base_date = schedule_date_parsed
+        start_dt = pd.to_datetime(row['预计开始时间'])
+        end_dt = pd.to_datetime(row['预计完成时间'])
+
+        start_frac = (start_dt.hour * 60 + start_dt.minute) / (24 * 60)
+        end_frac = (end_dt.hour * 60 + end_dt.minute) / (24 * 60)
+
+        base_num = pd.Timestamp(base_date).toordinal()
+        start_num = base_num + start_frac
+        end_num = base_num + end_frac
+
+        color = crew_colors.get(crew_id, '#95a5a6')
+        opacity = status_opacity.get(row['执行状态'], 0.5)
+
+        fig.add_trace(go.Bar(
+            x=[end_num - start_num],
+            y=[row['班组名称']],
+            base=[start_num],
+            orientation='h',
+            marker=dict(color=f"rgba{tuple(int(color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4)) + (opacity,)}",
+                      line=dict(color=color, width=2)),
+            name=f"{row['管段编号']} - {row['任务类型']}",
+            hovertext=(
+                f"<b>{row['任务编号']}</b><br>"
+                f"管段: {row['管段编号']}<br>"
+                f"类型: {row['任务类型']}<br>"
+                f"优先级: {row['动态优先级']}<br>"
+                f"预计: {start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}<br>"
+                f"时长: {row['预估时长(分钟)']:.0f}分钟<br>"
+                f"状态: {row['执行状态']}"
+            ),
+            hoverinfo='text',
+            showlegend=False,
+            width=0.6
+        ))
+
+        if pd.notna(row.get('实际开始时间')) and pd.notna(row.get('实际完成时间')):
+            actual_start = pd.to_datetime(row['实际开始时间'])
+            actual_end = pd.to_datetime(row['实际完成时间'])
+            actual_start_frac = (actual_start.hour * 60 + actual_start.minute) / (24 * 60)
+            actual_end_frac = (actual_end.hour * 60 + actual_end.minute) / (24 * 60)
+            actual_start_num = base_num + actual_start_frac
+            actual_end_num = base_num + actual_end_frac
+
+            fig.add_trace(go.Bar(
+                x=[actual_end_num - actual_start_num],
+                y=[row['班组名称']],
+                base=[actual_start_num],
+                orientation='h',
+                marker=dict(color='rgba(46, 204, 113, 0.7)',
+                          line=dict(color='#27ae60', width=2)),
+                name=f"实际: {row['管段编号']}",
+                hovertext=f"实际: {actual_start.strftime('%H:%M')} - {actual_end.strftime('%H:%M')}",
+                hoverinfo='text',
+                showlegend=False,
+                width=0.3
+            ))
+
+    def num_to_time(num):
+        frac = num - int(num)
+        minutes = frac * 24 * 60
+        hours = int(minutes // 60)
+        mins = int(minutes % 60)
+        return f"{hours:02d}:{mins:02d}"
+
+    tickvals = []
+    ticktext = []
+    base_num = pd.Timestamp(schedule_date_parsed).toordinal()
+    for hour in range(8, 19):
+        frac = hour / 24
+        tickvals.append(base_num + frac)
+        ticktext.append(f"{hour:02d}:00")
+
+    fig.update_layout(
+        title='班组每日任务时间轴（实线为计划，填充色为实际执行）',
+        template='plotly_white',
+        barmode='overlay',
+        xaxis=dict(
+            title='时间',
+            tickvals=tickvals,
+            ticktext=ticktext,
+            range=[base_num + 8/24, base_num + 18/24]
+        ),
+        yaxis=dict(
+            title='班组',
+            autorange='reversed'
+        ),
+        height=400,
+        margin=dict(l=100, r=20, t=50, b=50)
+    )
+
+    return fig
 
 
 if __name__ == '__main__':
