@@ -17,7 +17,8 @@ from data_processor import (
     calculate_statistics,
     detect_abnormal_growth,
     get_high_risk_segments,
-    detect_missing_inspections
+    detect_missing_inspections,
+    revalidate_dataframe
 )
 from visualizations import (
     create_pipe_history_chart,
@@ -345,7 +346,28 @@ app.layout = dbc.Container([
                 dbc.Row([
                     dbc.Col([
                         dbc.Card([
+                            dbc.CardHeader([
+                                html.I(className='fas fa-edit', style={'marginRight': '8px'}),
+                                '巡检数据编辑',
+                                html.Span('（可直接在表格中修改数据后点击"保存修改"重算风险统计）', 
+                                         style={'fontSize': '13px', 'color': '#7f8c8d', 'marginLeft': '10px', 'fontWeight': 'normal'})
+                            ], style={'fontWeight': 'bold', 'background': '#e8f6f3'}),
                             dbc.CardBody([
+                                dbc.Row([
+                                    dbc.Col([
+                                        dbc.ButtonGroup([
+                                            dbc.Button([html.I(className='fas fa-plus'), ' 添加记录'], 
+                                                      id='btn-add-row', color='success', outline=True, size='sm', className='me-2'),
+                                            dbc.Button([html.I(className='fas fa-trash'), ' 删除选中行'], 
+                                                      id='btn-delete-row', color='danger', outline=True, size='sm', className='me-2'),
+                                            dbc.Button([html.I(className='fas fa-save'), ' 保存修改并重算统计'], 
+                                                      id='btn-save-edits', color='primary', size='sm', className='me-2'),
+                                            dbc.Button([html.I(className='fas fa-undo'), ' 重置修改'], 
+                                                      id='btn-reset-edits', color='secondary', outline=True, size='sm')
+                                        ])
+                                    ])
+                                ], style={'marginBottom': '15px'}),
+                                html.Div(id='edit-status', style={'marginBottom': '10px'}),
                                 html.Div(id='detail-table')
                             ])
                         ], style=CARD_STYLE)
@@ -358,7 +380,11 @@ app.layout = dbc.Container([
     html.Footer([
         html.Hr(),
         html.Div('城市雨水管网淤积巡检分析台 | Python + Dash', style={'textAlign': 'center', 'color': '#95a5a6', 'fontSize': '12px'})
-    ])
+    ]),
+    
+    dcc.Store(id='edit-data-store', data=None),
+    dcc.Store(id='edit-trigger', data=0),
+    dcc.Store(id='save-signal', data=0)
     
 ], fluid=True, style={'padding': '20px', 'backgroundColor': '#f5f6fa', 'minHeight': '100vh'})
 
@@ -489,7 +515,7 @@ def update_on_district_change(district):
     batches = get_batches(df, district)
     
     stats = calculate_statistics(df, district, batches)
-    abnormal = detect_abnormal_growth(df, district)
+    abnormal = detect_abnormal_growth(df, district, batches)
     
     summary = f"共 {stats.get('记录总数', 0)} 条记录 / {stats.get('管段数量', 0)} 个管段 / {stats.get('巡检批次数量', 0)} 个批次"
     
@@ -515,11 +541,12 @@ def update_on_district_change(district):
      Output('stat-high-risk', 'children', allow_duplicate=True),
      Output('stat-abnormal', 'children', allow_duplicate=True),
      Output('data-summary', 'children', allow_duplicate=True)],
-    [Input('batch-filter', 'value')],
+    [Input('batch-filter', 'value'),
+     Input('save-signal', 'data')],
     [State('district-filter', 'value')],
     prevent_initial_call=True
 )
-def update_on_batch_change(selected_batches, district):
+def update_on_batch_change(selected_batches, save_signal, district):
     if GLOBAL_DATA['valid_df'].empty:
         return '-', '-', '-', '-', '-', '-', '无数据'
     
@@ -545,9 +572,10 @@ def update_on_batch_change(selected_batches, district):
 @callback(
     Output('pipe-history-chart', 'figure'),
     [Input('pipe-select', 'value'),
-     Input('district-filter', 'value')]
+     Input('district-filter', 'value'),
+     Input('save-signal', 'data')]
 )
-def update_pipe_history(pipe_id, district):
+def update_pipe_history(pipe_id, district, save_signal):
     if GLOBAL_DATA['valid_df'].empty or not pipe_id:
         import plotly.graph_objects as go
         fig = go.Figure()
@@ -565,9 +593,10 @@ def update_pipe_history(pipe_id, district):
     Output('pipes-comparison-chart', 'figure'),
     [Input('pipes-compare-select', 'value'),
      Input('compare-by', 'value'),
-     Input('district-filter', 'value')]
+     Input('district-filter', 'value'),
+     Input('save-signal', 'data')]
 )
-def update_pipes_comparison(pipe_ids, compare_by, district):
+def update_pipes_comparison(pipe_ids, compare_by, district, save_signal):
     if GLOBAL_DATA['valid_df'].empty or not pipe_ids:
         import plotly.graph_objects as go
         fig = go.Figure()
@@ -584,9 +613,10 @@ def update_pipes_comparison(pipe_ids, compare_by, district):
 @callback(
     Output('risk-heatmap', 'figure'),
     [Input('district-filter', 'value'),
-     Input('batch-filter', 'value')]
+     Input('batch-filter', 'value'),
+     Input('save-signal', 'data')]
 )
-def update_risk_heatmap(district, batches):
+def update_risk_heatmap(district, batches, save_signal):
     if GLOBAL_DATA['valid_df'].empty:
         import plotly.graph_objects as go
         fig = go.Figure()
@@ -600,9 +630,10 @@ def update_risk_heatmap(district, batches):
     [Output('trend-chart', 'figure'),
      Output('risk-distribution-chart', 'figure')],
     [Input('district-filter', 'value'),
-     Input('batch-filter', 'value')]
+     Input('batch-filter', 'value'),
+     Input('save-signal', 'data')]
 )
-def update_trend_and_distribution(district, batches):
+def update_trend_and_distribution(district, batches, save_signal):
     if GLOBAL_DATA['valid_df'].empty:
         import plotly.graph_objects as go
         empty_fig = go.Figure()
@@ -622,16 +653,17 @@ def update_trend_and_distribution(district, batches):
      Output('missing-inspections-table', 'children'),
      Output('detail-table', 'children')],
     [Input('district-filter', 'value'),
-     Input('batch-filter', 'value')]
+     Input('batch-filter', 'value'),
+     Input('save-signal', 'data')]
 )
-def update_tables(district, batches):
+def update_tables(district, batches, save_signal):
     if GLOBAL_DATA['valid_df'].empty:
         empty_msg = html.Div('暂无数据', style={'textAlign': 'center', 'color': '#95a5a6', 'padding': '20px'})
         return empty_msg, empty_msg, empty_msg, empty_msg
     
     high_risk_df = get_high_risk_segments(GLOBAL_DATA['valid_df'], district, batches)
-    abnormal_df = detect_abnormal_growth(GLOBAL_DATA['valid_df'], district)
-    missing_df = detect_missing_inspections(GLOBAL_DATA['valid_df'], district)
+    abnormal_df = detect_abnormal_growth(GLOBAL_DATA['valid_df'], district, batches)
+    missing_df = detect_missing_inspections(GLOBAL_DATA['valid_df'], district, batches)
     
     detail_df = GLOBAL_DATA['valid_df'].copy()
     if district:
@@ -722,6 +754,211 @@ def update_tables(district, batches):
         create_datatable(missing_df, missing_cols, '缺失巡检'),
         create_datatable(detail_df, detail_cols, '明细')
     )
+
+
+@callback(
+    Output('detail-table', 'children', allow_duplicate=True),
+    [Input('district-filter', 'value'),
+     Input('batch-filter', 'value'),
+     Input('save-signal', 'data'),
+     Input('btn-reset-edits', 'n_clicks')],
+    prevent_initial_call=True
+)
+def regenerate_detail_table(district, batches, save_signal, reset_clicks):
+    if GLOBAL_DATA['valid_df'].empty:
+        return html.Div('暂无数据', style={'textAlign': 'center', 'color': '#95a5a6', 'padding': '20px'})
+    
+    detail_df = GLOBAL_DATA['valid_df'].copy()
+    if district:
+        detail_df = detail_df[detail_df['片区'] == district]
+    if batches:
+        detail_df = detail_df[detail_df['巡检批次'].isin(batches)]
+    detail_df = detail_df.sort_values(['片区', '管段编号', '检查时间'])
+    
+    display_df = detail_df.copy()
+    for col in display_df.columns:
+        if pd.api.types.is_datetime64_any_dtype(display_df[col]):
+            display_df[col] = display_df[col].dt.strftime('%Y-%m-%d')
+    
+    detail_cols = [
+        {"name": "管段编号", "id": "管段编号", "editable": True},
+        {"name": "片区", "id": "片区", "editable": True},
+        {"name": "巡检批次", "id": "巡检批次", "editable": True},
+        {"name": "检查时间", "id": "检查时间", "editable": True, "type": "datetime"},
+        {"name": "淤积深度(mm)", "id": "淤积深度", "editable": True, "type": "numeric"},
+        {"name": "管径(mm)", "id": "管径", "editable": True, "type": "numeric"},
+        {"name": "淤积率", "id": "淤积率", "editable": False, "type": "numeric", "format": {"specifier": ".1%"}},
+        {"name": "备注", "id": "备注", "editable": True}
+    ]
+    
+    return dash_table.DataTable(
+        id='editable-detail-table',
+        data=display_df.to_dict('records'),
+        columns=detail_cols,
+        editable=True,
+        row_deletable=True,
+        row_selectable='multi',
+        selected_rows=[],
+        style_table={'overflowX': 'auto', 'maxHeight': '450px', 'overflowY': 'auto'},
+        style_header={
+            'backgroundColor': '#16a085',
+            'color': 'white',
+            'fontWeight': 'bold',
+            'textAlign': 'center'
+        },
+        style_cell={'textAlign': 'left', 'padding': '8px 12px', 'fontSize': '13px'},
+        style_data_conditional=[
+            {
+                'if': {'row_index': 'odd'},
+                'backgroundColor': '#f8f9fa'
+            },
+            {
+                'if': {
+                    'filter_query': '{淤积率} >= 0.6',
+                    'column_id': '淤积率'
+                },
+                'backgroundColor': '#fdedec',
+                'color': '#c0392b',
+                'fontWeight': 'bold'
+            },
+            {
+                'if': {
+                    'filter_query': '{淤积率} >= 0.3 && {淤积率} < 0.6',
+                    'column_id': '淤积率'
+                },
+                'backgroundColor': '#fef9e7',
+                'color': '#d68910'
+            }
+        ],
+        page_size=15,
+        sort_action='native',
+        filter_action='native',
+        export_format='csv',
+        fill_width=False,
+        style_cell_conditional=[
+            {'if': {'column_id': '管段编号'}, 'width': '100px'},
+            {'if': {'column_id': '片区'}, 'width': '80px'},
+            {'if': {'column_id': '巡检批次'}, 'width': '100px'},
+            {'if': {'column_id': '检查时间'}, 'width': '120px'},
+            {'if': {'column_id': '淤积深度'}, 'width': '110px'},
+            {'if': {'column_id': '管径'}, 'width': '90px'},
+            {'if': {'column_id': '淤积率'}, 'width': '90px'},
+            {'if': {'column_id': '备注'}, 'width': '200px'}
+        ]
+    )
+
+
+@callback(
+    [Output('edit-status', 'children'),
+     Output('save-signal', 'data'),
+     Output('district-filter', 'value', allow_duplicate=True),
+     Output('batch-filter', 'value', allow_duplicate=True),
+     Output('import-report', 'children', allow_duplicate=True)],
+    [Input('btn-save-edits', 'n_clicks'),
+     Input('btn-add-row', 'n_clicks'),
+     Input('btn-delete-row', 'n_clicks')],
+    [State('district-filter', 'value'),
+     State('batch-filter', 'value'),
+     State('editable-detail-table', 'data'),
+     State('editable-detail-table', 'selected_rows'),
+     State('save-signal', 'data')],
+    prevent_initial_call=True
+)
+def handle_edit_actions(save_clicks, add_clicks, delete_clicks, 
+                        district, batches, table_data, selected_rows, current_signal):
+    triggered = ctx.triggered_id
+    new_signal = current_signal + 1 if current_signal else 1
+    
+    if triggered == 'btn-save-edits' and save_clicks and table_data is not None:
+        edited_df = pd.DataFrame(table_data)
+        
+        required_cols = ['管段编号', '巡检批次', '检查时间', '淤积深度', '管径']
+        for col in required_cols:
+            if col not in edited_df.columns:
+                edited_df[col] = None
+        if '片区' not in edited_df.columns:
+            edited_df['片区'] = district if district else '默认片区'
+        if '备注' not in edited_df.columns:
+            edited_df['备注'] = ''
+        
+        valid_df, errors = revalidate_dataframe(edited_df)
+        
+        if errors:
+            error_df = pd.DataFrame(errors)
+            report = html.Div([
+                html.H6(f'⚠️ 保存后校验发现 {len(errors)} 条问题数据：', 
+                       style={'color': '#c0392b', 'marginBottom': '10px'}),
+                dash_table.DataTable(
+                    data=error_df.to_dict('records'),
+                    columns=[{"name": i, "id": i} for i in error_df.columns],
+                    style_table={'overflowX': 'auto', 'maxHeight': '200px', 'overflowY': 'auto'},
+                    style_header={'backgroundColor': '#f8d7da', 'fontWeight': 'bold'},
+                    style_cell={'textAlign': 'left', 'padding': '8px', 'fontSize': '12px'},
+                    page_size=5
+                )
+            ])
+        else:
+            report = html.Div('✅ 所有数据校验通过！', style={'color': '#27ae60', 'textAlign': 'center', 'padding': '20px'})
+        
+        if not valid_df.empty:
+            GLOBAL_DATA['valid_df'] = valid_df
+            GLOBAL_DATA['errors'] = errors
+            status = dbc.Alert([
+                html.I(className='fas fa-check-circle', style={'marginRight': '8px'}),
+                f'保存成功！已保留 {len(valid_df)} 条有效记录' + 
+                (f'，忽略 {len(errors)} 条问题记录' if errors else '') + 
+                '，风险统计已重新计算'
+            ], color='success', duration=5000, is_open=True)
+        else:
+            status = dbc.Alert([
+                html.I(className='fas fa-exclamation-circle', style={'marginRight': '8px'}),
+                f'无有效记录被保存，请检查数据格式'
+            ], color='warning', duration=5000, is_open=True)
+        
+        return status, new_signal, district, batches, report
+    
+    elif triggered == 'btn-add-row' and add_clicks:
+        default_date = datetime.now().strftime('%Y-%m-%d')
+        new_row = {
+            '管段编号': f'NEW{add_clicks:03d}',
+            '片区': district if district else '默认片区',
+            '巡检批次': batches[-1] if batches else '新批次',
+            '检查时间': default_date,
+            '淤积深度': 0,
+            '管径': 500,
+            '淤积率': 0,
+            '备注': '新增记录'
+        }
+        
+        if table_data is None:
+            table_data = []
+        table_data.append(new_row)
+        
+        status = dbc.Alert([
+            html.I(className='fas fa-plus-circle', style={'marginRight': '8px'}),
+            f'已添加新行，请填写数据后点击"保存修改"按钮生效'
+        ], color='info', duration=4000, is_open=True)
+        
+        return status, dash.no_update, district, batches, dash.no_update
+    
+    elif triggered == 'btn-delete-row' and delete_clicks:
+        if table_data is None or not selected_rows:
+            status = dbc.Alert([
+                html.I(className='fas fa-info-circle', style={'marginRight': '8px'}),
+                f'请先勾选要删除的行'
+            ], color='warning', duration=3000, is_open=True)
+            return status, dash.no_update, district, batches, dash.no_update
+        
+        table_data = [row for i, row in enumerate(table_data) if i not in selected_rows]
+        
+        status = dbc.Alert([
+            html.I(className='fas fa-trash-alt', style={'marginRight': '8px'}),
+            f'已删除 {len(selected_rows)} 行，点击"保存修改"使删除生效'
+        ], color='info', duration=4000, is_open=True)
+        
+        return status, dash.no_update, district, batches, dash.no_update
+    
+    return '', dash.no_update, district, batches, dash.no_update
 
 
 if __name__ == '__main__':

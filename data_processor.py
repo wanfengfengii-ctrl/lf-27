@@ -191,11 +191,13 @@ def calculate_statistics(df, district=None, batches=None):
     return stats
 
 
-def detect_abnormal_growth(df, district=None):
+def detect_abnormal_growth(df, district=None, batches=None):
     if df.empty:
         return pd.DataFrame()
     
-    filtered = df[df['片区'] == district].copy() if district else df.copy()
+    filtered = df.copy()
+    if district:
+        filtered = filtered[filtered['片区'] == district]
     
     if filtered.empty:
         return pd.DataFrame()
@@ -209,6 +211,10 @@ def detect_abnormal_growth(df, district=None):
             for i in range(1, len(group)):
                 prev_row = group.iloc[i - 1]
                 curr_row = group.iloc[i]
+                
+                if batches:
+                    if prev_row['巡检批次'] not in batches or curr_row['巡检批次'] not in batches:
+                        continue
                 
                 prev_rate = prev_row['淤积率']
                 curr_rate = curr_row['淤积率']
@@ -285,24 +291,31 @@ def get_risk_heatmap_data(df, district=None, batches=None):
     return heatmap_data
 
 
-def detect_missing_inspections(df, district=None):
+def detect_missing_inspections(df, district=None, batches=None):
     if df.empty:
         return pd.DataFrame()
     
-    filtered = df[df['片区'] == district].copy() if district else df.copy()
+    filtered = df.copy()
+    if district:
+        filtered = filtered[filtered['片区'] == district]
     
     if filtered.empty:
         return pd.DataFrame()
     
-    all_batches = sorted(filtered['巡检批次'].unique().tolist())
-    all_pipes = filtered['管段编号'].unique().tolist()
+    if batches:
+        check_batches = sorted([b for b in batches if b in filtered['巡检批次'].unique()])
+    else:
+        check_batches = sorted(filtered['巡检批次'].unique().tolist())
+    
+    pipes_in_batches = filtered[filtered['巡检批次'].isin(check_batches)]['管段编号'].unique().tolist()
+    all_pipes = sorted(pipes_in_batches)
     
     missing_records = []
     for pipe_id in all_pipes:
         pipe_data = filtered[filtered['管段编号'] == pipe_id]
         pipe_batches = set(pipe_data['巡检批次'].tolist())
         
-        for batch in all_batches:
+        for batch in check_batches:
             if batch not in pipe_batches:
                 missing_records.append({
                     '管段编号': pipe_id,
@@ -322,3 +335,113 @@ def get_batch_comparison_data(df, pipe_ids, district=None):
         filtered = filtered[filtered['片区'] == district]
     
     return filtered.sort_values(['管段编号', '检查时间'])
+
+
+def revalidate_dataframe(df):
+    errors = []
+    valid_rows = []
+    
+    if '片区' not in df.columns:
+        df['片区'] = '默认片区'
+    
+    df = df.reset_index(drop=True)
+    
+    for idx, row in df.iterrows():
+        row_num = idx + 1
+        row_errors = []
+        
+        pipe_id = str(row.get('管段编号', '')).strip()
+        if not pipe_id or pipe_id == 'nan':
+            row_errors.append('管段编号为空')
+        
+        batch = str(row.get('巡检批次', '')).strip()
+        if not batch or batch == 'nan':
+            row_errors.append('巡检批次为空')
+        
+        try:
+            check_date_val = row.get('检查时间', '')
+            if pd.isna(check_date_val):
+                row_errors.append('检查时间为空')
+                check_date = pd.NaT
+            else:
+                check_date = pd.to_datetime(check_date_val)
+                if pd.isna(check_date):
+                    row_errors.append('检查时间格式无效')
+        except Exception:
+            row_errors.append('检查时间格式无效')
+            check_date = pd.NaT
+        
+        try:
+            sediment_val = row.get('淤积深度', np.nan)
+            if pd.isna(sediment_val) or str(sediment_val).strip() == '':
+                row_errors.append('淤积深度为空')
+                sediment_depth = np.nan
+            else:
+                sediment_depth = float(sediment_val)
+                if sediment_depth < 0:
+                    row_errors.append(f'淤积深度为负数 ({sediment_depth})')
+        except (ValueError, TypeError):
+            row_errors.append('淤积深度不是有效数字')
+            sediment_depth = np.nan
+        
+        try:
+            diameter_val = row.get('管径', np.nan)
+            if pd.isna(diameter_val) or str(diameter_val).strip() == '':
+                row_errors.append('管径为空')
+                diameter = np.nan
+            else:
+                diameter = float(diameter_val)
+                if diameter <= 0:
+                    row_errors.append(f'管径必须大于0 ({diameter})')
+        except (ValueError, TypeError):
+            row_errors.append('管径不是有效数字')
+            diameter = np.nan
+        
+        if not pd.isna(sediment_depth) and not pd.isna(diameter):
+            if sediment_depth > diameter:
+                row_errors.append(f'淤积深度 ({sediment_depth}) 超过管径 ({diameter})')
+        
+        remark = str(row.get('备注', '')) if pd.notna(row.get('备注', '')) else ''
+        district_val = str(row.get('片区', '默认片区')) if pd.notna(row.get('片区', '默认片区')) else '默认片区'
+        
+        if row_errors:
+            errors.append({
+                '行号': row_num,
+                '管段编号': pipe_id if pipe_id else '未知',
+                '巡检批次': batch if batch else '未知',
+                '错误原因': '；'.join(row_errors),
+                '原始数据': str(row.to_dict())
+            })
+        else:
+            valid_rows.append({
+                '管段编号': pipe_id,
+                '巡检批次': batch,
+                '检查时间': check_date,
+                '淤积深度': sediment_depth,
+                '管径': diameter,
+                '备注': remark,
+                '片区': district_val,
+                '淤积率': round(sediment_depth / diameter, 4) if diameter > 0 else 0
+            })
+    
+    valid_df = pd.DataFrame(valid_rows)
+    
+    if not valid_df.empty:
+        dup_mask = valid_df.duplicated(subset=['管段编号', '巡检批次', '片区'], keep=False)
+        duplicates = valid_df[dup_mask]
+        duplicate_errors = []
+        if not duplicates.empty:
+            for (pid, batch, district_val), group in duplicates.groupby(['管段编号', '巡检批次', '片区']):
+                for _, dup_row in group.iloc[1:].iterrows():
+                    original_idx = valid_df.index.get_loc(dup_row.name)
+                    duplicate_errors.append({
+                        '行号': f'第{original_idx + 1}条',
+                        '管段编号': pid,
+                        '巡检批次': batch,
+                        '错误原因': f'同一管段在同一巡检批次({batch})内重复记录',
+                        '原始数据': str(dup_row.to_dict())
+                    })
+            valid_df = valid_df.drop_duplicates(subset=['管段编号', '巡检批次', '片区'], keep='first')
+            errors.extend(duplicate_errors)
+    
+    return valid_df, errors

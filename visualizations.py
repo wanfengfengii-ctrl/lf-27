@@ -116,21 +116,51 @@ def create_pipe_history_chart(df, pipe_id, district=None):
         missing_batches = [b for b in all_batches if b not in existing_batches]
         
         if missing_batches:
+            y_depth_min = history['淤积深度'].min() if len(history) > 0 else 0
+            y_depth_marker = max(0, y_depth_min * 0.1)
+            
+            y_rate_min = history['淤积率'].min() * 100 if len(history) > 0 else 0
+            y_rate_marker = max(0, y_rate_min * 0.1)
+            
             fig.add_trace(
                 go.Scatter(
                     x=missing_batches,
-                    y=[None] * len(missing_batches),
-                    mode='markers',
+                    y=[y_depth_marker] * len(missing_batches),
+                    mode='markers+text',
                     name='缺失巡检',
                     marker=dict(
-                        symbol='x',
-                        size=15,
+                        symbol='x-thin',
+                        size=18,
                         color='#e74c3c',
-                        line=dict(width=2)
+                        line=dict(width=3, color='#c0392b')
                     ),
-                    hovertemplate='<b>批次</b>: %{x}<br><b>状态</b>: 缺失巡检记录'
+                    text=['⚠️缺失'] * len(missing_batches),
+                    textposition='top center',
+                    textfont=dict(color='#c0392b', size=11, family='Arial, sans-serif'),
+                    hovertemplate='<b>批次</b>: %{x}<br><b>状态</b>: 缺失巡检记录<extra></extra>'
                 ),
                 row=1, col=1
+            )
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=missing_batches,
+                    y=[y_rate_marker] * len(missing_batches),
+                    mode='markers+text',
+                    name='缺失巡检',
+                    showlegend=False,
+                    marker=dict(
+                        symbol='x-thin',
+                        size=18,
+                        color='#e74c3c',
+                        line=dict(width=3, color='#c0392b')
+                    ),
+                    text=['⚠️缺失'] * len(missing_batches),
+                    textposition='top center',
+                    textfont=dict(color='#c0392b', size=11, family='Arial, sans-serif'),
+                    hovertemplate='<b>批次</b>: %{x}<br><b>状态</b>: 缺失巡检记录<extra></extra>'
+                ),
+                row=2, col=1
             )
     
     fig.update_layout(
