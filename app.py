@@ -30,7 +30,16 @@ from data_processor import (
     get_effective_rules,
     DEFAULT_RISK_RULES,
     merge_repaired_batch,
-    merge_edited_subset
+    merge_edited_subset,
+    generate_inspection_tasks,
+    assign_task,
+    batch_assign_tasks,
+    start_task,
+    complete_task,
+    close_task,
+    refresh_all_task_status,
+    calculate_task_statistics,
+    compare_before_after
 )
 from visualizations import (
     create_pipe_history_chart,
@@ -40,7 +49,11 @@ from visualizations import (
     create_sediment_trend_chart,
     create_dredging_effect_chart,
     create_district_comparison_chart,
-    create_priority_dashboard_chart
+    create_priority_dashboard_chart,
+    create_task_status_chart,
+    create_task_completion_chart,
+    create_before_after_comparison_chart,
+    create_dredging_effect_summary_chart
 )
 
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.SANDSTONE], suppress_callback_exceptions=True)
@@ -53,7 +66,9 @@ GLOBAL_DATA = {
     'errors': [],
     'warnings': [],
     'has_district': False,
-    'custom_rules': None
+    'custom_rules': None,
+    'tasks_df': pd.DataFrame(),
+    'selected_task_id': None
 }
 
 HEADER_STYLE = {
@@ -700,6 +715,193 @@ app.layout = dbc.Container([
                         ], style=CARD_STYLE)
                     ], width=12)
                 ])
+            ]),
+
+            dbc.Tab(label='🎯 任务编排与闭环处置', tab_id='tab-tasks', children=[
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Card([
+                            dbc.CardHeader('任务生成配置',
+                                           style={'fontWeight': 'bold', 'background': '#e8f8f5', 'fontSize': '16px'}),
+                            dbc.CardBody([
+                                dbc.Row([
+                                    dbc.Col([
+                                        html.Label('选择片区:',
+                                                   style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                                        dcc.Dropdown(id='task-district-filter', placeholder='全部片区',
+                                                     clearable=True)
+                                    ], md=2),
+                                    dbc.Col([
+                                        html.Label('关联巡检批次:',
+                                                   style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                                        dcc.Dropdown(id='task-batch-filter', placeholder='全部批次')
+                                    ], md=2),
+                                    dbc.Col([
+                                        html.Label('每批最大任务数:',
+                                                   style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                                        dcc.Input(id='task-max-count', type='number',
+                                                  value=50, min=1, max=500, step=10,
+                                                  style={'width': '100%', 'height': '36px'})
+                                    ], md=2),
+                                    dbc.Col([
+                                        html.Label('派发人员:',
+                                                   style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                                        dcc.Dropdown(
+                                            id='task-assignee-select',
+                                            options=[
+                                                {'label': '巡检组A - 张工', 'value': '张工(巡检组A)'},
+                                                {'label': '巡检组B - 李工', 'value': '李工(巡检组B)'},
+                                                {'label': '清淤组1 - 王队长', 'value': '王队长(清淤组1)'},
+                                                {'label': '清淤组2 - 赵队长', 'value': '赵队长(清淤组2)'},
+                                                {'label': '机动组 - 刘工', 'value': '刘工(机动组)'}
+                                            ],
+                                            placeholder='选择派发人员',
+                                            clearable=True, multi=False
+                                        )
+                                    ], md=3),
+                                    dbc.Col([
+                                        html.Div([
+                                            dbc.ButtonGroup([
+                                                dbc.Button('🔄 自动生成任务', id='btn-generate-tasks',
+                                                           color='primary', size='md',
+                                                           style={'marginTop': '25px', 'width': '100%'}),
+                                                dbc.Button('📊 刷新状态/预警', id='btn-refresh-task-status',
+                                                           color='info', size='md',
+                                                           style={'marginTop': '25px', 'width': '100%'})
+                                            ], style={'width': '100%'})
+                                        ])
+                                    ], md=3)
+                                ], style={'marginBottom': '15px'}),
+                                html.Div(id='task-generate-status', style={'marginBottom': '5px'})
+                            ])
+                        ], style=CARD_STYLE)
+                    ], width=12)
+                ]),
+
+                dbc.Row([
+                    dbc.Col(md=3, children=[
+                        dbc.Card([
+                            dbc.CardHeader('📈 任务统计概览',
+                                           style={'fontWeight': 'bold', 'background': '#eaf2f8'}),
+                            dbc.CardBody([
+                                html.Div(id='task-stat-cards', style={'marginBottom': '15px'}),
+                                dcc.Graph(id='task-status-chart')
+                            ])
+                        ], style=CARD_STYLE)
+                    ]),
+                    dbc.Col(md=9, children=[
+                        dbc.Card([
+                            dbc.CardHeader('📋 任务清单（支持多选批量派发/处理）',
+                                           style={'fontWeight': 'bold', 'background': '#fdf2e9'}),
+                            dbc.CardBody([
+                                dbc.Row([
+                                    dbc.Col(md=3, children=[
+                                        html.Label('任务状态筛选:',
+                                                   style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                                        dcc.Dropdown(
+                                            id='task-status-filter',
+                                            options=[
+                                                {'label': '全部状态', 'value': 'ALL'},
+                                                {'label': '待派发', 'value': '待派发'},
+                                                {'label': '已派发', 'value': '已派发'},
+                                                {'label': '处理中', 'value': '处理中'},
+                                                {'label': '已完成', 'value': '已完成'},
+                                                {'label': '已超期', 'value': '已超期'},
+                                                {'label': '已闭环', 'value': '已闭环'}
+                                            ],
+                                            value='ALL', clearable=False
+                                        )
+                                    ]),
+                                    dbc.Col(md=2, children=[
+                                        html.Label('任务类型:',
+                                                   style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                                        dcc.Dropdown(
+                                            id='task-type-filter',
+                                            options=[
+                                                {'label': '全部类型', 'value': 'ALL'},
+                                                {'label': '巡检', 'value': '巡检'},
+                                                {'label': '复检', 'value': '复检'},
+                                                {'label': '清淤', 'value': '清淤'}
+                                            ],
+                                            value='ALL', clearable=False
+                                        )
+                                    ]),
+                                    dbc.Col(md=2, children=[
+                                        html.Label('优先级:',
+                                                   style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                                        dcc.Dropdown(
+                                            id='task-priority-filter',
+                                            options=[
+                                                {'label': '全部优先级', 'value': 'ALL'},
+                                                {'label': '紧急', 'value': '紧急'},
+                                                {'label': '高', 'value': '高'},
+                                                {'label': '中', 'value': '中'},
+                                                {'label': '低', 'value': '低'}
+                                            ],
+                                            value='ALL', clearable=False
+                                        )
+                                    ]),
+                                    dbc.Col(md=5, children=[
+                                        html.Label('批量操作:',
+                                                   style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                                        dbc.ButtonGroup([
+                                            dbc.Button('📤 批量派发', id='btn-batch-assign',
+                                                       color='primary', size='sm', className='me-1'),
+                                            dbc.Button('✅ 批量闭环', id='btn-batch-close',
+                                                       color='success', size='sm', className='me-1'),
+                                            dbc.Button('🗑️ 删除选中', id='btn-batch-delete',
+                                                       color='danger', size='sm'),
+                                        ], style={'marginTop': '25px'})
+                                    ])
+                                ], style={'marginBottom': '12px'}),
+                                html.Div(id='task-list-table')
+                            ])
+                        ], style=CARD_STYLE)
+                    ])
+                ]),
+
+                dbc.Row([
+                    dbc.Col(md=6, children=[
+                        dbc.Card([
+                            dbc.CardHeader('🔍 任务详情与处理',
+                                           style={'fontWeight': 'bold', 'background': '#f5eef8'}),
+                            dbc.CardBody([
+                                html.Div(id='task-detail-panel',
+                                         children=[make_empty_msg('请从任务清单中选择一个任务查看详情并处理')])
+                            ])
+                        ], style=CARD_STYLE)
+                    ]),
+                    dbc.Col(md=6, children=[
+                        dbc.Card([
+                            dbc.CardHeader('📊 整改前后效果对比',
+                                           style={'fontWeight': 'bold', 'background': '#e8f8f5'}),
+                            dbc.CardBody([
+                                dcc.Graph(id='task-before-after-chart')
+                            ])
+                        ], style=CARD_STYLE)
+                    ])
+                ]),
+
+                dbc.Row([
+                    dbc.Col(md=6, children=[
+                        dbc.Card([
+                            dbc.CardHeader('📊 完成率与闭环率统计',
+                                           style={'fontWeight': 'bold', 'background': '#eaf2f8'}),
+                            dbc.CardBody([
+                                dcc.Graph(id='task-completion-chart')
+                            ])
+                        ], style=CARD_STYLE)
+                    ]),
+                    dbc.Col(md=6, children=[
+                        dbc.Card([
+                            dbc.CardHeader('🧹 清淤效果评估汇总',
+                                           style={'fontWeight': 'bold', 'background': '#fef9e7'}),
+                            dbc.CardBody([
+                                dcc.Graph(id='task-dredging-effect-chart')
+                            ])
+                        ], style=CARD_STYLE)
+                    ])
+                ])
             ])
         ], id='main-tabs', active_tab='tab-single', style={'marginBottom': '20px'})
     ]),
@@ -711,7 +913,9 @@ app.layout = dbc.Container([
     ]),
 
     dcc.Store(id='save-signal', data=0),
-    dcc.Store(id='risk-rules-store', data=None)
+    dcc.Store(id='risk-rules-store', data=None),
+    dcc.Store(id='task-signal', data=0),
+    dcc.Store(id='selected-tasks-store', data=[])
 
 ], fluid=True, style={'padding': '20px', 'backgroundColor': '#f5f6fa', 'minHeight': '100vh'})
 
@@ -727,7 +931,11 @@ app.layout = dbc.Container([
      Output('pipe-select', 'options'),
      Output('pipes-compare-select', 'options'),
      Output('batch-validate-select', 'options'),
-     Output('dredge-pipe-select', 'options')],
+     Output('dredge-pipe-select', 'options'),
+     Output('task-district-filter', 'options'),
+     Output('task-district-filter', 'value'),
+     Output('task-batch-filter', 'options'),
+     Output('task-batch-filter', 'value')],
     [Input('upload-data', 'contents')],
     [State('upload-data', 'filename')]
 )
@@ -737,7 +945,8 @@ def update_upload(contents, filename):
             '', '',
             make_empty_msg('尚未导入数据'),
             {'display': 'none'},
-            [], None, [], [], [], [], []
+            [], None, [], [], [], [], [],
+            [], None, [], None
         )
 
     result = parse_contents(contents, filename)
@@ -748,7 +957,8 @@ def update_upload(contents, filename):
             dbc.Alert(msg, color='danger'), '',
             make_empty_msg('尚未导入数据'),
             {'display': 'none'},
-            [], None, [], [], [], [], []
+            [], None, [], [], [], [], [],
+            [], None, [], None
         )
 
     valid_df, errors, warnings, has_district, raw_df = result
@@ -757,6 +967,8 @@ def update_upload(contents, filename):
     GLOBAL_DATA['warnings'] = warnings
     GLOBAL_DATA['has_district'] = has_district
     GLOBAL_DATA['raw_df'] = raw_df
+    GLOBAL_DATA['tasks_df'] = pd.DataFrame()
+    GLOBAL_DATA['selected_task_id'] = None
 
     upload_status = dbc.Alert(f'成功导入 {len(valid_df)} 条有效记录', color='success')
     file_info = (f'文件: {filename} | 原始记录: {len(raw_df)} 条 | '
@@ -798,6 +1010,7 @@ def update_upload(contents, filename):
 
     batches = get_batches(valid_df)
     batch_options = [{'label': b, 'value': b} for b in batches]
+    latest_batch = batches[-1] if batches else None
 
     pipes = get_pipe_ids(valid_df)
     pipe_options = [{'label': p, 'value': p} for p in pipes]
@@ -806,7 +1019,8 @@ def update_upload(contents, filename):
         upload_status, file_info, import_report,
         {'display': 'block'},
         district_options, None, batch_options,
-        pipe_options, pipe_options, batch_options, pipe_options
+        pipe_options, pipe_options, batch_options, pipe_options,
+        district_options, None, batch_options, latest_batch
     )
 
 
@@ -1611,6 +1825,742 @@ def update_priority_dashboard(save_signal, rules_data):
     report_html = render_quality_report(report)
 
     return chart, table, report_html
+
+
+@callback(
+    [Output('task-generate-status', 'children'),
+     Output('task-signal', 'data')],
+    [Input('btn-generate-tasks', 'n_clicks'),
+     Input('btn-refresh-task-status', 'n_clicks')],
+    [State('task-district-filter', 'value'),
+     State('task-batch-filter', 'value'),
+     State('task-max-count', 'value'),
+     State('task-assignee-select', 'value'),
+     State('risk-rules-store', 'data'),
+     State('task-signal', 'data')],
+    prevent_initial_call=True
+)
+def handle_task_generate_and_refresh(gen_clicks, refresh_clicks,
+                                     district, batch_name, max_count,
+                                     assignee, rules_data, current_signal):
+    triggered = ctx.triggered_id
+    new_signal = (current_signal + 1) if current_signal else 1
+    df = GLOBAL_DATA['valid_df']
+
+    if df.empty:
+        return dbc.Alert('请先导入巡检数据', color='warning'), dash.no_update
+
+    if triggered == 'btn-generate-tasks':
+        max_tasks = int(max_count) if max_count and max_count > 0 else 50
+        existing_tasks = GLOBAL_DATA['tasks_df'] if not GLOBAL_DATA['tasks_df'].empty else None
+
+        new_tasks = generate_inspection_tasks(
+            df, district=district, batch_name=batch_name,
+            rules=rules_data, max_tasks_per_batch=max_tasks,
+            exclude_completed=True, existing_tasks_df=existing_tasks
+        )
+
+        if new_tasks.empty:
+            status_msg = dbc.Alert('未生成新任务，可能所有管段都已有任务或无满足条件的数据',
+                                   color='info', duration=5000)
+            return status_msg, new_signal
+
+        if GLOBAL_DATA['tasks_df'].empty:
+            GLOBAL_DATA['tasks_df'] = new_tasks
+        else:
+            GLOBAL_DATA['tasks_df'] = pd.concat(
+                [GLOBAL_DATA['tasks_df'], new_tasks], ignore_index=True
+            )
+
+        gen_count = len(new_tasks)
+        type_count = new_tasks['任务类型'].value_counts().to_dict()
+        type_str = '、'.join([f'{k}:{v}' for k, v in type_count.items()])
+        urgent_count = len(new_tasks[new_tasks['动态优先级'] == '紧急'])
+        high_count = len(new_tasks[new_tasks['动态优先级'] == '高'])
+
+        status_parts = [
+            html.Div(f'✅ 成功生成 {gen_count} 个任务！',
+                     style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+            html.Div(f'任务类型: {type_str}'),
+            html.Div(f'其中 紧急: {urgent_count} 个, 高优先级: {high_count} 个'),
+        ]
+
+        if assignee:
+            pending_ids = new_tasks[new_tasks['任务状态'] == '待派发']['任务编号'].tolist()
+            if pending_ids:
+                GLOBAL_DATA['tasks_df'] = batch_assign_tasks(
+                    GLOBAL_DATA['tasks_df'], pending_ids, assignee
+                )
+                status_parts.append(html.Div(
+                    f'已自动派发给: {assignee}（共 {len(pending_ids)} 个任务）',
+                    style={'marginTop': '5px', 'color': '#2980b9'}
+                ))
+
+        status_msg = dbc.Alert(status_parts, color='success', duration=8000)
+        return status_msg, new_signal
+
+    elif triggered == 'btn-refresh-task-status':
+        if GLOBAL_DATA['tasks_df'].empty:
+            return dbc.Alert('暂无任务数据，请先生成任务', color='info', duration=4000), dash.no_update
+
+        before_overdue = len(GLOBAL_DATA['tasks_df'][GLOBAL_DATA['tasks_df']['是否超期'] == '是'])
+        GLOBAL_DATA['tasks_df'] = refresh_all_task_status(GLOBAL_DATA['tasks_df'])
+        after_overdue = len(GLOBAL_DATA['tasks_df'][GLOBAL_DATA['tasks_df']['是否超期'] == '是'])
+        new_overdue = after_overdue - before_overdue
+
+        total = len(GLOBAL_DATA['tasks_df'])
+        pending = len(GLOBAL_DATA['tasks_df'][GLOBAL_DATA['tasks_df']['任务状态编码'] == 'PENDING'])
+        in_progress = len(GLOBAL_DATA['tasks_df'][GLOBAL_DATA['tasks_df']['任务状态编码'] == 'IN_PROGRESS'])
+        closed = len(GLOBAL_DATA['tasks_df'][GLOBAL_DATA['tasks_df']['任务状态编码'] == 'CLOSED'])
+
+        parts = [
+            html.Div('📊 任务状态已刷新！', style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+            html.Div(f'任务总数: {total} | 待派发: {pending} | 处理中: {in_progress} | 已闭环: {closed}'),
+            html.Div(f'超期任务: {after_overdue} 个' + (f'（新增 {new_overdue} 个超期预警）' if new_overdue > 0 else ''))
+        ]
+        if after_overdue > 0:
+            status_msg = dbc.Alert(parts, color='warning', duration=6000)
+        else:
+            status_msg = dbc.Alert(parts, color='info', duration=5000)
+
+        return status_msg, new_signal
+
+    return '', dash.no_update
+
+
+@callback(
+    [Output('task-stat-cards', 'children'),
+     Output('task-status-chart', 'figure'),
+     Output('task-list-table', 'children'),
+     Output('task-completion-chart', 'figure'),
+     Output('task-dredging-effect-chart', 'figure')],
+    [Input('task-signal', 'data'),
+     Input('task-status-filter', 'value'),
+     Input('task-type-filter', 'value'),
+     Input('task-priority-filter', 'value'),
+     Input('save-signal', 'data'),
+     Input('risk-rules-store', 'data')]
+)
+def render_task_dashboard(task_signal, status_filter, type_filter, priority_filter,
+                          save_signal, rules_data):
+    tasks_df = GLOBAL_DATA['tasks_df']
+
+    if tasks_df is None or tasks_df.empty:
+        empty_stats = dbc.Row([
+            dbc.Col([
+                html.Div([
+                    html.Div('任务总数', style={'fontSize': '12px', 'color': '#7f8c8d'}),
+                    html.Div('0', style={'fontSize': '22px', 'fontWeight': 'bold', 'color': '#2c3e50'})
+                ], style={'textAlign': 'center', 'padding': '10px', 'background': '#f8f9fa', 'borderRadius': '8px'})
+            ], xs=6, md=3),
+            dbc.Col([
+                html.Div([
+                    html.Div('待处理', style={'fontSize': '12px', 'color': '#7f8c8d'}),
+                    html.Div('0', style={'fontSize': '22px', 'fontWeight': 'bold', 'color': '#e67e22'})
+                ], style={'textAlign': 'center', 'padding': '10px', 'background': '#fef9e7', 'borderRadius': '8px'})
+            ], xs=6, md=3),
+            dbc.Col([
+                html.Div([
+                    html.Div('已完成', style={'fontSize': '12px', 'color': '#7f8c8d'}),
+                    html.Div('0', style={'fontSize': '22px', 'fontWeight': 'bold', 'color': '#27ae60'})
+                ], style={'textAlign': 'center', 'padding': '10px', 'background': '#eafaf1', 'borderRadius': '8px'})
+            ], xs=6, md=3),
+            dbc.Col([
+                html.Div([
+                    html.Div('闭环率', style={'fontSize': '12px', 'color': '#7f8c8d'}),
+                    html.Div('0%', style={'fontSize': '22px', 'fontWeight': 'bold', 'color': '#8e44ad'})
+                ], style={'textAlign': 'center', 'padding': '10px', 'background': '#f5eef8', 'borderRadius': '8px'})
+            ], xs=6, md=3),
+        ])
+        return (
+            empty_stats,
+            make_empty_fig('暂无任务数据，请先生成任务'),
+            make_empty_msg('暂无任务数据，请点击上方"自动生成任务"按钮创建任务'),
+            make_empty_fig('暂无完成率数据'),
+            make_empty_fig('暂无清淤效果数据')
+        )
+
+    if not tasks_df.empty:
+        tasks_df = refresh_all_task_status(tasks_df.copy())
+
+    stats = calculate_task_statistics(tasks_df, rules=rules_data)
+
+    def _make_stat_card(title, value, color, bg):
+        if isinstance(value, float) and 0 <= value <= 1:
+            display_val = f'{value * 100:.1f}%'
+        else:
+            display_val = str(value)
+        return dbc.Col([
+            html.Div([
+                html.Div(title, style={'fontSize': '12px', 'color': '#7f8c8d'}),
+                html.Div(display_val, style={'fontSize': '22px', 'fontWeight': 'bold', 'color': color})
+            ], style={'textAlign': 'center', 'padding': '10px', 'background': bg, 'borderRadius': '8px'})
+        ], xs=6, md=3)
+
+    stat_cards = dbc.Row([
+        _make_stat_card('任务总数', stats.get('任务总数', 0), '#2c3e50', '#f8f9fa'),
+        _make_stat_card('待处理', stats.get('待处理任务数', 0), '#e67e22', '#fef9e7'),
+        _make_stat_card('已完成', stats.get('已完成含超期', 0), '#27ae60', '#eafaf1'),
+        _make_stat_card('闭环率', stats.get('闭环完成率', 0), '#8e44ad', '#f5eef8'),
+    ])
+
+    status_chart = create_task_status_chart(stats, tasks_df)
+    completion_chart = create_task_completion_chart(stats)
+    dredge_effect_chart = create_dredging_effect_summary_chart(stats)
+
+    filtered_df = tasks_df.copy()
+    if status_filter and status_filter != 'ALL':
+        filtered_df = filtered_df[filtered_df['任务状态'] == status_filter]
+    if type_filter and type_filter != 'ALL':
+        filtered_df = filtered_df[filtered_df['任务类型'] == type_filter]
+    if priority_filter and priority_filter != 'ALL':
+        filtered_df = filtered_df[filtered_df['动态优先级'] == priority_filter]
+
+    if filtered_df.empty:
+        task_table = make_empty_msg('当前筛选条件下无任务数据')
+    else:
+        priority_order = {'紧急': 0, '高': 1, '中': 2, '低': 3}
+        filtered_df['_sort'] = filtered_df['动态优先级'].map(priority_order)
+        filtered_df = filtered_df.sort_values(['_sort', '优先级评分'], ascending=[True, False])
+        filtered_df = filtered_df.drop(columns=['_sort'])
+
+        display_df = filtered_df.copy()
+        for col in display_df.columns:
+            if pd.api.types.is_datetime64_any_dtype(display_df[col]):
+                display_df[col] = display_df[col].dt.strftime('%Y-%m-%d %H:%M')
+            elif col in ['最新淤积率', '增长率', '处理后淤积率', '整改前淤积率']:
+                display_df[col] = display_df[col].apply(
+                    lambda x: f'{x * 100:.1f}%' if pd.notna(x) and x != '' else ''
+                )
+
+        status_color_map = {
+            '待派发': '#95a5a6',
+            '已派发': '#3498db',
+            '处理中': '#f39c12',
+            '已完成': '#27ae60',
+            '已超期': '#e74c3c',
+            '已闭环': '#8e44ad'
+        }
+        priority_color_map = {'紧急': '#c0392b', '高': '#e74c3c', '中': '#f39c12', '低': '#27ae60'}
+
+        style_conditions = [{'if': {'row_index': 'odd'}, 'backgroundColor': '#f8f9fa'}]
+        for status, color in status_color_map.items():
+            style_conditions.append({
+                'if': {'filter_query': f'{{任务状态}} = "{status}"', 'column_id': '任务状态'},
+                'color': color, 'fontWeight': 'bold'
+            })
+        for priority, color in priority_color_map.items():
+            style_conditions.append({
+                'if': {'filter_query': f'{{动态优先级}} = "{priority}"', 'column_id': '动态优先级'},
+                'color': color, 'fontWeight': 'bold'
+            })
+        style_conditions.append({
+            'if': {'filter_query': '{是否超期} = "是"', 'column_id': '是否超期'},
+            'color': '#e74c3c', 'fontWeight': 'bold', 'backgroundColor': '#fdedec'
+        })
+
+        display_cols = [
+            {"name": "任务编号", "id": "任务编号"},
+            {"name": "管段编号", "id": "管段编号"},
+            {"name": "片区", "id": "片区"},
+            {"name": "任务类型", "id": "任务类型"},
+            {"name": "动态优先级", "id": "动态优先级"},
+            {"name": "优先级评分", "id": "优先级评分"},
+            {"name": "任务状态", "id": "任务状态"},
+            {"name": "是否超期", "id": "是否超期"},
+            {"name": "超期天数", "id": "超期天数"},
+            {"name": "触发原因", "id": "触发原因"},
+            {"name": "处理人员", "id": "处理人员"},
+            {"name": "派发时间", "id": "派发时间"},
+            {"name": "截止时间", "id": "截止时间"},
+            {"name": "整改效果评级", "id": "整改效果评级"},
+        ]
+
+        task_table = html.Div([
+            dash_table.DataTable(
+                id='task-datatable',
+                data=display_df.to_dict('records'),
+                columns=display_cols,
+                style_table={'overflowX': 'auto', 'maxHeight': '550px', 'overflowY': 'auto'},
+                style_header={
+                    'backgroundColor': '#2c3e50', 'color': 'white',
+                    'fontWeight': 'bold', 'textAlign': 'center',
+                    'position': 'sticky', 'top': 0, 'zIndex': 100
+                },
+                style_cell={'textAlign': 'left', 'padding': '6px 10px', 'fontSize': '12px'},
+                style_data_conditional=style_conditions,
+                page_size=15, sort_action='native', filter_action='native',
+                export_format='csv', row_selectable='multi',
+                selected_rows=[],
+                style_cell_conditional=[
+                    {'if': {'column_id': '任务编号'}, 'width': '160px'},
+                    {'if': {'column_id': '管段编号'}, 'width': '80px'},
+                    {'if': {'column_id': '片区'}, 'width': '60px'},
+                    {'if': {'column_id': '任务类型'}, 'width': '65px'},
+                    {'if': {'column_id': '动态优先级'}, 'width': '80px'},
+                    {'if': {'column_id': '优先级评分'}, 'width': '75px'},
+                    {'if': {'column_id': '任务状态'}, 'width': '75px'},
+                    {'if': {'column_id': '是否超期'}, 'width': '70px'},
+                    {'if': {'column_id': '超期天数'}, 'width': '70px'},
+                    {'if': {'column_id': '触发原因'}, 'width': '150px'},
+                    {'if': {'column_id': '处理人员'}, 'width': '110px'},
+                ]
+            ),
+            html.Div(
+                f'共显示 {len(display_df)} 个任务（双击行可查看详情并处理）',
+                style={'marginTop': '8px', 'fontSize': '12px', 'color': '#7f8c8d', 'textAlign': 'right'}
+            )
+        ])
+
+    return stat_cards, status_chart, task_table, completion_chart, dredge_effect_chart
+
+
+@callback(
+    [Output('task-detail-panel', 'children'),
+     Output('task-before-after-chart', 'figure'),
+     Output('selected-tasks-store', 'data')],
+    [Input('task-datatable', 'active_cell'),
+     Input('task-datatable', 'selected_rows'),
+     Input('task-signal', 'data'),
+     Input('task-status-filter', 'value'),
+     Input('task-type-filter', 'value'),
+     Input('task-priority-filter', 'value')],
+    [State('task-datatable', 'data'),
+     State('selected-tasks-store', 'data')],
+    prevent_initial_call=True
+)
+def handle_task_selection(active_cell, selected_rows, task_signal,
+                          status_filter, type_filter, priority_filter,
+                          table_data, current_selected):
+    tasks_df = GLOBAL_DATA['tasks_df']
+    ctx_triggered = ctx.triggered_id
+
+    selected_task_ids = []
+    if selected_rows and table_data:
+        for idx in selected_rows:
+            if idx < len(table_data):
+                selected_task_ids.append(table_data[idx].get('任务编号', ''))
+
+    if tasks_df is None or tasks_df.empty:
+        return (
+            make_empty_msg('请先生成任务后再选择'),
+            make_empty_fig('暂无任务数据'),
+            selected_task_ids
+        )
+
+    tasks_df = refresh_all_task_status(tasks_df.copy())
+
+    selected_task_id = None
+    if active_cell and table_data:
+        row_idx = active_cell.get('row', 0)
+        if row_idx < len(table_data):
+            selected_task_id = table_data[row_idx].get('任务编号', '')
+            GLOBAL_DATA['selected_task_id'] = selected_task_id
+    elif GLOBAL_DATA.get('selected_task_id'):
+        selected_task_id = GLOBAL_DATA['selected_task_id']
+
+    comparison_fig = make_empty_fig('请选择已完成的清淤/复检任务查看整改对比')
+    if selected_task_id:
+        comparison_data = compare_before_after(tasks_df, selected_task_id)
+        comparison_fig = create_before_after_comparison_chart(comparison_data)
+
+    if not selected_task_id:
+        return (
+            make_empty_msg('请从任务清单中点击选择一个任务查看详情并处理'),
+            comparison_fig,
+            selected_task_ids
+        )
+
+    task_row = tasks_df[tasks_df['任务编号'] == selected_task_id]
+    if task_row.empty:
+        return (
+            make_empty_msg('未找到该任务数据'),
+            comparison_fig,
+            selected_task_ids
+        )
+
+    task = task_row.iloc[0]
+    status = task['任务状态']
+    status_code = task['任务状态编码']
+
+    priority_color = task.get('优先级颜色', '#95a5a6')
+    status_colors = {
+        '待派发': '#95a5a6', '已派发': '#3498db', '处理中': '#f39c12',
+        '已完成': '#27ae60', '已超期': '#e74c3c', '已闭环': '#8e44ad'
+    }
+    status_color = status_colors.get(status, '#95a5a6')
+
+    def _fmt_date(val):
+        if pd.isna(val) or val is None or val == '':
+            return '-'
+        if isinstance(val, str):
+            return val
+        return val.strftime('%Y-%m-%d %H:%M')
+
+    def _fmt_rate(val):
+        if pd.isna(val) or val is None or val == '':
+            return '-'
+        return f'{float(val) * 100:.1f}%'
+
+    def _fmt_num(val):
+        if pd.isna(val) or val is None or val == '':
+            return '-'
+        return str(val)
+
+    detail_sections = []
+    detail_sections.append(html.Div([
+        dbc.Row([
+            dbc.Col([
+                html.H6(f"📋 任务 {task['任务编号']}",
+                        style={'fontWeight': 'bold', 'marginBottom': '10px', 'color': '#2c3e50'})
+            ], md=8),
+            dbc.Col([
+                html.Div([
+                    html.Span(status, style={
+                        'background': status_color, 'color': 'white',
+                        'padding': '4px 12px', 'borderRadius': '12px',
+                        'fontSize': '12px', 'fontWeight': 'bold'
+                    }),
+                    html.Span(f" {task['动态优先级']}", style={
+                        'background': priority_color, 'color': 'white',
+                        'padding': '4px 12px', 'borderRadius': '12px',
+                        'fontSize': '12px', 'fontWeight': 'bold', 'marginLeft': '8px'
+                    })
+                ], style={'textAlign': 'right'})
+            ], md=4)
+        ]),
+        html.Hr(style={'margin': '10px 0'})
+    ]))
+
+    detail_sections.append(html.Div([
+        dbc.Row([
+            dbc.Col([
+                html.Div([
+                    html.Label('管段/片区信息', style={'fontWeight': 'bold', 'fontSize': '13px', 'color': '#2980b9'}),
+                    html.Ul([
+                        html.Li(f"管段编号: {task['管段编号']}"),
+                        html.Li(f"片区: {task['片区']}"),
+                        html.Li(f"管径: {_fmt_num(task['管径(mm)'])} mm"),
+                    ], style={'fontSize': '12px', 'paddingLeft': '20px'})
+                ])
+            ], md=4),
+            dbc.Col([
+                html.Div([
+                    html.Label('淤积状态', style={'fontWeight': 'bold', 'fontSize': '13px', 'color': '#e67e22'}),
+                    html.Ul([
+                        html.Li(f"最新淤积率: {_fmt_rate(task['最新淤积率'])}"),
+                        html.Li(f"淤积深度: {_fmt_num(task['最新淤积深度(mm)'])} mm"),
+                        html.Li(f"增长率: {_fmt_rate(task['增长率'])} {'⚠️' if task['异常增长'] == '是' else ''}"),
+                    ], style={'fontSize': '12px', 'paddingLeft': '20px'})
+                ])
+            ], md=4),
+            dbc.Col([
+                html.Div([
+                    html.Label('任务信息', style={'fontWeight': 'bold', 'fontSize': '13px', 'color': '#8e44ad'}),
+                    html.Ul([
+                        html.Li(f"任务类型: {task['任务类型']}"),
+                        html.Li(f"触发原因: {task['触发原因']}"),
+                        html.Li(f"缺失巡检: {'是' if task['巡检缺失'] == '是' else '否'}" +
+                                (f" ({task['缺失批次列表']})" if task['缺失批次列表'] else '')),
+                    ], style={'fontSize': '12px', 'paddingLeft': '20px'})
+                ])
+            ], md=4),
+        ], style={'marginBottom': '15px'})
+    ]))
+
+    detail_sections.append(html.Div([
+        dbc.Row([
+            dbc.Col([
+                html.Div([
+                    html.Label('处理进度', style={'fontWeight': 'bold', 'fontSize': '13px', 'color': '#27ae60'}),
+                    html.Ul([
+                        html.Li(f"派发人员: {task['派发人员'] if task['派发人员'] else '未派发'}"),
+                        html.Li(f"派发时间: {_fmt_date(task['派发时间'])}"),
+                        html.Li(f"处理人员: {task['处理人员'] if task['处理人员'] else '未指派'}"),
+                        html.Li(f"开始处理: {_fmt_date(task['处理开始时间'])}"),
+                        html.Li(f"处理完成: {_fmt_date(task['处理完成时间'])}"),
+                        html.Li(f"闭环确认: {task['闭环确认人'] if task['闭环确认人'] else '未闭环'} ({_fmt_date(task['闭环时间'])})"),
+                    ], style={'fontSize': '12px', 'paddingLeft': '20px'})
+                ])
+            ], md=6),
+            dbc.Col([
+                html.Div([
+                    html.Label('时间与超期', style={'fontWeight': 'bold', 'fontSize': '13px', 'color': '#c0392b'}),
+                    html.Ul([
+                        html.Li(f"创建时间: {_fmt_date(task['创建时间'])}"),
+                        html.Li([
+                            '截止时间: ',
+                            html.Span(_fmt_date(task['截止时间']), style={
+                                'color': '#e74c3c', 'fontWeight': 'bold'
+                            } if task['是否超期'] == '是' else {})
+                        ]),
+                        html.Li([
+                            '是否超期: ',
+                            html.Span(task['是否超期'] + (f" ({task['超期天数']}天)" if task['超期天数'] > 0 else ''),
+                                      style={'color': '#e74c3c', 'fontWeight': 'bold'} if task['是否超期'] == '是' else {})
+                        ]),
+                    ], style={'fontSize': '12px', 'paddingLeft': '20px'})
+                ])
+            ], md=6),
+        ], style={'marginBottom': '15px'})
+    ]))
+
+    if status_code in ['COMPLETED', 'CLOSED']:
+        result_parts = [
+            html.Li(f"处理结果: {task['处理结果'] if task['处理结果'] else '未填写'}"),
+            html.Li(f"处理备注: {task['处理备注'] if task['处理备注'] else '无'}"),
+        ]
+        if task['任务类型编码'] == 'DREDGING':
+            result_parts.append(html.Li(f"处理后淤积深度: {_fmt_num(task['处理后淤积深度(mm)'])} mm"))
+            result_parts.append(html.Li(f"处理后淤积率: {_fmt_rate(task['处理后淤积率'])}"))
+            effect = task['整改效果评级']
+            effect_colors = {'显著有效': '#27ae60', '部分有效': '#f39c12',
+                             '效果不明显': '#e67e22', '淤积加重': '#e74c3c'}
+            if effect:
+                result_parts.append(html.Li([
+                    '整改效果评级: ',
+                    html.Span(effect, style={
+                        'color': effect_colors.get(effect, '#95a5a6'), 'fontWeight': 'bold'
+                    })
+                ]))
+        detail_sections.append(html.Div([
+            html.Label('处置结果', style={'fontWeight': 'bold', 'fontSize': '13px', 'color': '#16a085'}),
+            html.Ul(result_parts, style={'fontSize': '12px', 'paddingLeft': '20px'})
+        ], style={'marginBottom': '15px'}))
+
+    action_forms = []
+
+    if status_code == 'PENDING':
+        action_forms.append(html.Div([
+            html.Hr(style={'margin': '15px 0'}),
+            html.Label('📤 派发任务', style={'fontWeight': 'bold', 'color': '#2980b9', 'marginBottom': '8px'}),
+            dbc.Row([
+                dbc.Col([
+                    dcc.Dropdown(
+                        id='assign-person-select',
+                        options=[
+                            {'label': '巡检组A - 张工', 'value': '张工(巡检组A)'},
+                            {'label': '巡检组B - 李工', 'value': '李工(巡检组B)'},
+                            {'label': '清淤组1 - 王队长', 'value': '王队长(清淤组1)'},
+                            {'label': '清淤组2 - 赵队长', 'value': '赵队长(清淤组2)'},
+                            {'label': '机动组 - 刘工', 'value': '刘工(机动组)'}
+                        ],
+                        placeholder='选择派发人员',
+                        clearable=False,
+                        value=task['处理人员'] if task['处理人员'] else None
+                    )
+                ], md=8),
+                dbc.Col([
+                    dbc.Button('确认派发', id='btn-assign-single',
+                               color='primary', size='md', style={'width': '100%'})
+                ], md=4)
+            ])
+        ]))
+    elif status_code in ['ASSIGNED', 'OVERDUE']:
+        action_forms.append(html.Div([
+            html.Hr(style={'margin': '15px 0'}),
+            html.Label('▶️ 开始处理任务',
+                       style={'fontWeight': 'bold', 'color': '#f39c12', 'marginBottom': '8px'}),
+            dbc.Button('开始处理此任务', id='btn-start-single',
+                       color='warning', size='md')
+        ]))
+    elif status_code == 'IN_PROGRESS':
+        is_dredging = task['任务类型编码'] == 'DREDGING'
+        result_options = [
+            {'label': '巡检正常/无异常', 'value': '巡检正常'},
+            {'label': '发现问题已记录', 'value': '发现问题'},
+            {'label': '已完成清淤作业', 'value': '清淤完成'},
+            {'label': '复检合格', 'value': '复检合格'},
+            {'label': '复检不合格', 'value': '复检不合格'},
+        ]
+        action_forms.append(html.Div([
+            html.Hr(style={'margin': '15px 0'}),
+            html.Label('✅ 完成任务处理 - 回填处置结果',
+                       style={'fontWeight': 'bold', 'color': '#27ae60', 'marginBottom': '10px'}),
+            dbc.Row([
+                dbc.Col([
+                    html.Label('处理结果:', style={'fontSize': '12px', 'marginBottom': '3px'}),
+                    dcc.Dropdown(id='complete-result-select', options=result_options,
+                                 placeholder='选择处理结果', clearable=False)
+                ], md=4),
+                dbc.Col([
+                    html.Label('处理后淤积深度(mm):' if is_dredging else '备注淤积深度(mm):',
+                               style={'fontSize': '12px', 'marginBottom': '3px'}),
+                    dcc.Input(id='complete-post-depth', type='number',
+                              placeholder='输入淤积深度mm', min=0,
+                              style={'width': '100%', 'height': '36px'})
+                ], md=4) if is_dredging else dbc.Col([
+                    html.Label('处理后淤积率(%):', style={'fontSize': '12px', 'marginBottom': '3px'}),
+                    dcc.Input(id='complete-post-rate', type='number',
+                              placeholder='0-100%', min=0, max=100,
+                              style={'width': '100%', 'height': '36px'})
+                ], md=4),
+                dbc.Col([
+                    html.Label('处理备注:', style={'fontSize': '12px', 'marginBottom': '3px'}),
+                    dbc.Input(id='complete-note', placeholder='输入备注信息', type='text')
+                ], md=4),
+            ], style={'marginBottom': '10px'}),
+            dbc.Row([
+                dbc.Col([
+                    dbc.Button('提交处理结果', id='btn-complete-single',
+                               color='success', size='md')
+                ], md=4)
+            ])
+        ]))
+    elif status_code in ['COMPLETED']:
+        action_forms.append(html.Div([
+            html.Hr(style={'margin': '15px 0'}),
+            html.Label('🔒 闭环确认', style={'fontWeight': 'bold', 'color': '#8e44ad', 'marginBottom': '8px'}),
+            dbc.Row([
+                dbc.Col([
+                    dbc.Input(id='close-confirm-person', placeholder='输入闭环确认人',
+                              type='text', value='系统管理员')
+                ], md=6),
+                dbc.Col([
+                    dbc.Button('确认闭环此任务', id='btn-close-single',
+                               color='secondary', size='md')
+                ], md=6)
+            ])
+        ]))
+    elif status_code == 'CLOSED':
+        action_forms.append(html.Div([
+            html.Hr(style={'margin': '15px 0'}),
+            dbc.Alert([
+                html.I(className='fas fa-check-circle', style={'marginRight': '8px'}),
+                '此任务已完成闭环归档，处置流程结束'
+            ], color='success')
+        ]))
+
+    detail_sections.append(html.Div(action_forms, id='task-action-forms'))
+
+    detail_html = html.Div(detail_sections, style={
+        'padding': '5px', 'fontSize': '13px',
+        'maxHeight': '550px', 'overflowY': 'auto'
+    })
+
+    return detail_html, comparison_fig, selected_task_ids
+
+
+@callback(
+    Output('task-signal', 'data', allow_duplicate=True),
+    [Input('btn-assign-single', 'n_clicks'),
+     Input('btn-start-single', 'n_clicks'),
+     Input('btn-complete-single', 'n_clicks'),
+     Input('btn-close-single', 'n_clicks')],
+    [State('assign-person-select', 'value'),
+     State('complete-result-select', 'value'),
+     State('complete-post-depth', 'value'),
+     State('complete-post-rate', 'value'),
+     State('complete-note', 'value'),
+     State('close-confirm-person', 'value'),
+     State('task-signal', 'data'),
+     State('risk-rules-store', 'data')],
+    prevent_initial_call=True
+)
+def handle_task_actions(assign_clicks, start_clicks, complete_clicks, close_clicks,
+                        assignee, result, post_depth, post_rate, note,
+                        confirmer, current_signal, rules_data):
+    triggered = ctx.triggered_id
+    selected_id = GLOBAL_DATA.get('selected_task_id')
+    new_signal = (current_signal + 1) if current_signal else 1
+
+    if not selected_id or GLOBAL_DATA['tasks_df'].empty:
+        return dash.no_update
+
+    tasks_df = GLOBAL_DATA['tasks_df'].copy()
+
+    if triggered == 'btn-assign-single' and assign_clicks:
+        if not assignee:
+            return dash.no_update
+        tasks_df = assign_task(tasks_df, selected_id, assignee)
+    elif triggered == 'btn-start-single' and start_clicks:
+        tasks_df = start_task(tasks_df, selected_id)
+    elif triggered == 'btn-complete-single' and complete_clicks:
+        if not result:
+            return dash.no_update
+        actual_post_rate = None
+        if post_rate is not None:
+            actual_post_rate = float(post_rate) / 100
+        tasks_df = complete_task(
+            tasks_df, selected_id, result, note or '',
+            post_depth=post_depth, post_rate=actual_post_rate,
+            rules=rules_data
+        )
+    elif triggered == 'btn-close-single' and close_clicks:
+        tasks_df = close_task(tasks_df, selected_id, confirmer or '系统管理员')
+    else:
+        return dash.no_update
+
+    GLOBAL_DATA['tasks_df'] = tasks_df
+    return new_signal
+
+
+@callback(
+    [Output('task-generate-status', 'children', allow_duplicate=True),
+     Output('task-signal', 'data', allow_duplicate=True)],
+    [Input('btn-batch-assign', 'n_clicks'),
+     Input('btn-batch-close', 'n_clicks'),
+     Input('btn-batch-delete', 'n_clicks')],
+    [State('selected-tasks-store', 'data'),
+     State('task-assignee-select', 'value'),
+     State('task-signal', 'data')],
+    prevent_initial_call=True
+)
+def handle_batch_operations(assign_clicks, close_clicks, delete_clicks,
+                            selected_ids, assignee, current_signal):
+    triggered = ctx.triggered_id
+    new_signal = (current_signal + 1) if current_signal else 1
+
+    if not selected_ids:
+        return dbc.Alert('请先从任务列表中勾选要操作的任务', color='warning', duration=4000), dash.no_update
+
+    tasks_df = GLOBAL_DATA['tasks_df']
+    if tasks_df.empty:
+        return dbc.Alert('暂无任务数据', color='warning'), dash.no_update
+
+    valid_ids = [tid for tid in selected_ids if tid and tid in tasks_df['任务编号'].values]
+    if not valid_ids:
+        return dbc.Alert('未找到有效的任务编号', color='warning', duration=4000), dash.no_update
+
+    tasks_df = tasks_df.copy()
+    count = 0
+
+    if triggered == 'btn-batch-assign' and assign_clicks:
+        if not assignee:
+            return dbc.Alert('请先在上方选择派发人员', color='warning', duration=4000), dash.no_update
+        pending_ids = tasks_df[
+            (tasks_df['任务编号'].isin(valid_ids)) &
+            (tasks_df['任务状态编码'].isin(['PENDING']))
+        ]['任务编号'].tolist()
+        if pending_ids:
+            tasks_df = batch_assign_tasks(tasks_df, pending_ids, assignee)
+            count = len(pending_ids)
+        msg = f'✅ 已派发 {count} 个待派发任务给 {assignee}'
+        if count == 0:
+            msg = '所选任务中没有待派发状态的任务'
+
+    elif triggered == 'btn-batch-close' and close_clicks:
+        closable_ids = tasks_df[
+            (tasks_df['任务编号'].isin(valid_ids)) &
+            (tasks_df['任务状态编码'].isin(['COMPLETED', 'OVERDUE']))
+        ]['任务编号'].tolist()
+        for tid in closable_ids:
+            tasks_df = close_task(tasks_df, tid, '批量闭环')
+            count += 1
+        msg = f'✅ 已批量闭环 {count} 个任务'
+        if count == 0:
+            msg = '所选任务中没有已完成或已超期状态的任务'
+
+    elif triggered == 'btn-batch-delete' and delete_clicks:
+        before = len(tasks_df)
+        tasks_df = tasks_df[~tasks_df['任务编号'].isin(valid_ids)].reset_index(drop=True)
+        count = before - len(tasks_df)
+        msg = f'🗑️ 已删除 {count} 个任务'
+        if count == 0:
+            msg = '未找到可删除的任务'
+
+    GLOBAL_DATA['tasks_df'] = tasks_df
+    return dbc.Alert(msg, color='success' if count > 0 else 'info', duration=5000), new_signal
 
 
 if __name__ == '__main__':

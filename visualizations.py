@@ -772,3 +772,412 @@ def create_priority_dashboard_chart(priority_df, rules=None):
     fig.update_yaxes(title_text='风险评分', row=1, col=2)
 
     return fig
+
+
+def create_task_status_chart(task_stats, tasks_df=None):
+    if not task_stats or task_stats.get('任务总数', 0) == 0:
+        fig = go.Figure()
+        fig.update_layout(
+            title='暂无任务统计数据',
+            template='plotly_white',
+            height=500
+        )
+        return fig
+
+    fig = make_subplots(
+        rows=2, cols=2,
+        specs=[[{'type': 'domain'}, {'type': 'xy'}],
+               [{'type': 'xy'}, {'type': 'xy'}]],
+        subplot_titles=(
+            '任务状态分布',
+            '各状态任务数量',
+            '任务类型分布',
+            '优先级分布'
+        ),
+        vertical_spacing=0.15,
+        horizontal_spacing=0.1
+    )
+
+    status_labels = ['待派发', '已派发', '处理中', '已完成', '已超期', '已闭环']
+    status_values = [task_stats.get(f'{s}任务数', 0) for s in status_labels]
+    status_colors = ['#95a5a6', '#3498db', '#f39c12', '#27ae60', '#e74c3c', '#8e44ad']
+    status_values_filtered = [(l, v, c) for l, v, c in zip(status_labels, status_values, status_colors) if v > 0]
+
+    if status_values_filtered:
+        labels, values, colors = zip(*status_values_filtered)
+        fig.add_trace(
+            go.Pie(
+                labels=list(labels),
+                values=list(values),
+                marker_colors=list(colors),
+                textinfo='label+percent+value',
+                hole=0.45
+            ),
+            row=1, col=1
+        )
+
+        fig.add_trace(
+            go.Bar(
+                x=status_labels,
+                y=status_values,
+                marker_color=status_colors,
+                text=status_values,
+                textposition='auto',
+                showlegend=False
+            ),
+            row=1, col=2
+        )
+    else:
+        fig.add_annotation(
+            text='暂无状态数据',
+            xref='paper', yref='paper',
+            x=0.25, y=0.75,
+            showarrow=False, font=dict(size=14, color='#95a5a6')
+        )
+        fig.add_annotation(
+            text='暂无状态数据',
+            xref='paper', yref='paper',
+            x=0.75, y=0.75,
+            showarrow=False, font=dict(size=14, color='#95a5a6')
+        )
+
+    type_labels = ['巡检', '复检', '清淤']
+    type_values = [task_stats.get(f'{t}任务数', 0) for t in type_labels]
+    type_colors = ['#3498db', '#9b59b6', '#e67e22']
+
+    fig.add_trace(
+        go.Bar(
+            x=type_labels,
+            y=type_values,
+            marker_color=type_colors,
+            text=type_values,
+            textposition='auto',
+            showlegend=False
+        ),
+        row=2, col=1
+    )
+
+    priority_labels = ['紧急', '高', '中', '低']
+    priority_values = [task_stats.get(f'{p}优先级任务数', 0) for p in priority_labels]
+    priority_colors = ['#c0392b', '#e74c3c', '#f39c12', '#27ae60']
+
+    fig.add_trace(
+        go.Bar(
+            x=priority_labels,
+            y=priority_values,
+            marker_color=priority_colors,
+            text=priority_values,
+            textposition='auto',
+            showlegend=False
+        ),
+        row=2, col=2
+    )
+
+    fig.update_layout(
+        title=dict(
+            text=f"智能巡检任务统计总览（共 {task_stats.get('任务总数', 0)} 个任务）",
+            x=0.5,
+            xanchor='center',
+            font=dict(size=16)
+        ),
+        template='plotly_white',
+        height=650,
+        showlegend=False
+    )
+
+    fig.update_yaxes(title_text='任务数量', row=1, col=2)
+    fig.update_yaxes(title_text='任务数量', row=2, col=1)
+    fig.update_yaxes(title_text='任务数量', row=2, col=2)
+
+    return fig
+
+
+def create_task_completion_chart(task_stats):
+    if not task_stats or task_stats.get('任务总数', 0) == 0:
+        fig = go.Figure()
+        fig.update_layout(
+            title='暂无任务统计数据',
+            template='plotly_white',
+            height=400
+        )
+        return fig
+
+    total = task_stats.get('任务总数', 0)
+    closed = task_stats.get('已闭环任务数', 0)
+    completed = task_stats.get('已完成含超期', 0)
+    pending = task_stats.get('待处理任务数', 0)
+
+    fig = make_subplots(
+        rows=1, cols=3,
+        specs=[[{'type': 'domain'}, {'type': 'domain'}, {'type': 'xy'}]],
+        subplot_titles=(
+            f'闭环完成率: {task_stats.get("闭环完成率", 0)*100:.1f}%',
+            f'完成率: {task_stats.get("完成率", 0)*100:.1f}%',
+            '分片区闭环率对比'
+        )
+    )
+
+    fig.add_trace(
+        go.Pie(
+            labels=['已闭环', '未闭环'],
+            values=[closed, total - closed],
+            marker_colors=['#27ae60', '#ecf0f1'],
+            textinfo='label+value',
+            hole=0.6
+        ),
+        row=1, col=1
+    )
+
+    fig.add_trace(
+        go.Pie(
+            labels=['已完成(含超期)', '待处理'],
+            values=[completed, pending],
+            marker_colors=['#3498db', '#e74c3c'],
+            textinfo='label+value',
+            hole=0.6
+        ),
+        row=1, col=2
+    )
+
+    district_stats = task_stats.get('分片区统计', {})
+    if district_stats:
+        districts = list(district_stats.keys())
+        close_rates = [district_stats[d].get('闭环率', 0) * 100 for d in districts]
+        completion_rates = [district_stats[d].get('完成率', 0) * 100 for d in districts]
+
+        fig.add_trace(
+            go.Bar(
+                name='闭环率(%)',
+                x=districts,
+                y=close_rates,
+                marker_color='#27ae60',
+                text=[f'{r:.1f}%' for r in close_rates],
+                textposition='auto'
+            ),
+            row=1, col=3
+        )
+        fig.add_trace(
+            go.Bar(
+                name='完成率(%)',
+                x=districts,
+                y=completion_rates,
+                marker_color='#3498db',
+                text=[f'{r:.1f}%' for r in completion_rates],
+                textposition='auto'
+            ),
+            row=1, col=3
+        )
+
+        fig.update_yaxes(title_text='百分比 (%)', row=1, col=3, range=[0, 105])
+    else:
+        fig.add_annotation(
+            text='暂无分片区数据',
+            xref='paper', yref='paper',
+            x=0.83, y=0.5,
+            showarrow=False, font=dict(size=14, color='#95a5a6')
+        )
+
+    fig.update_layout(
+        title=dict(
+            text='任务完成与闭环率统计',
+            x=0.5,
+            xanchor='center',
+            font=dict(size=16)
+        ),
+        template='plotly_white',
+        height=450,
+        barmode='group',
+        legend=dict(orientation='h', yanchor='bottom', y=-0.15, xanchor='center', x=0.5)
+    )
+
+    return fig
+
+
+def create_before_after_comparison_chart(comparison_data):
+    if not comparison_data:
+        fig = go.Figure()
+        fig.update_layout(
+            title='请选择已完成的任务查看整改对比',
+            template='plotly_white',
+            height=450
+        )
+        return fig
+
+    pipe_id = comparison_data.get('管段编号', '')
+    task_type = comparison_data.get('任务类型', '')
+    effect_color = comparison_data.get('效果颜色', '#95a5a6')
+    effect_level = comparison_data.get('效果评级', '')
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=('淤积率对比 (%)', '淤积深度对比 (mm)')
+    )
+
+    categories = ['整改前', '整改后']
+
+    pre_rate = comparison_data.get('清淤前淤积率', 0) or 0
+    post_rate = comparison_data.get('清淤后淤积率', 0) or 0
+    rate_values = [pre_rate * 100, post_rate * 100]
+
+    pre_depth = comparison_data.get('清淤前淤积深度', 0) or 0
+    post_depth = comparison_data.get('清淤后淤积深度', 0) or 0
+    depth_values = [pre_depth, post_depth]
+
+    fig.add_trace(
+        go.Bar(
+            x=categories,
+            y=rate_values,
+            marker_color=['#e74c3c', effect_color],
+            text=[f'{v:.1f}%' for v in rate_values],
+            textposition='auto',
+            width=0.45,
+            showlegend=False
+        ),
+        row=1, col=1
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=categories,
+            y=depth_values,
+            marker_color=['#e67e22', effect_color],
+            text=[f'{v:.1f}mm' for v in depth_values],
+            textposition='auto',
+            width=0.45,
+            showlegend=False
+        ),
+        row=1, col=2
+    )
+
+    diameter = comparison_data.get('管径(mm)', 0)
+    if diameter and diameter > 0:
+        fig.add_hline(
+            y=100,
+            line_dash='dash',
+            line_color='#95a5a6',
+            annotation_text=f'管径上限 (100%)',
+            annotation_position='top right',
+            row=1, col=1
+        )
+        fig.add_hline(
+            y=diameter,
+            line_dash='dash',
+            line_color='#95a5a6',
+            annotation_text=f'管径上限 ({diameter}mm)',
+            annotation_position='top right',
+            row=1, col=2
+        )
+
+    rate_change = comparison_data.get('淤积率变化百分比', 0) or 0
+    depth_change = comparison_data.get('深度变化量', 0) or 0
+
+    fig.update_layout(
+        title=dict(
+            text=f"整改前后效果对比 - 管段 {pipe_id}（{task_type}） | 效果评级: <span style='color:{effect_color}'>{effect_level}</span>",
+            x=0.5,
+            xanchor='center',
+            font=dict(size=15)
+        ),
+        template='plotly_white',
+        height=450,
+        showlegend=False
+    )
+
+    fig.update_yaxes(title_text='淤积率 (%)', row=1, col=1)
+    fig.update_yaxes(title_text='淤积深度 (mm)', row=1, col=2)
+
+    return fig
+
+
+def create_dredging_effect_summary_chart(task_stats):
+    if not task_stats:
+        fig = go.Figure()
+        fig.update_layout(
+            title='暂无清淤效果数据',
+            template='plotly_white',
+            height=400
+        )
+        return fig
+
+    effect_stats = task_stats.get('清淤效果统计', {})
+    total_dredge = task_stats.get('清淤任务数', 0)
+    effective_rate = task_stats.get('清淤有效率', 0) * 100
+
+    if not effect_stats:
+        fig = go.Figure()
+        fig.add_annotation(
+            text=f'暂无清淤效果评估数据<br>共 {total_dredge} 个清淤任务',
+            xref='paper', yref='paper',
+            x=0.5, y=0.5,
+            showarrow=False, font=dict(size=16, color='#95a5a6')
+        )
+        fig.update_layout(
+            title='清淤效果评估汇总',
+            template='plotly_white',
+            height=400
+        )
+        return fig
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        specs=[[{'type': 'domain'}, {'type': 'xy'}]],
+        subplot_titles=(
+            f'清淤有效率: {effective_rate:.1f}%',
+            '各效果评级分布'
+        )
+    )
+
+    effect_labels = ['显著有效', '部分有效', '效果不明显', '淤积加重']
+    effect_colors = ['#27ae60', '#f39c12', '#e67e22', '#e74c3c']
+    effect_values = [effect_stats.get(l, 0) for l in effect_labels]
+
+    effect_filtered = [(l, v, c) for l, v, c in zip(effect_labels, effect_values, effect_colors) if v > 0]
+
+    if effect_filtered:
+        labels, values, colors = zip(*effect_filtered)
+        fig.add_trace(
+            go.Pie(
+                labels=list(labels),
+                values=list(values),
+                marker_colors=list(colors),
+                textinfo='label+percent+value',
+                hole=0.5
+            ),
+            row=1, col=1
+        )
+    else:
+        fig.add_annotation(
+            text='暂无数据',
+            xref='paper', yref='paper',
+            x=0.25, y=0.5,
+            showarrow=False, font=dict(size=14, color='#95a5a6')
+        )
+
+    fig.add_trace(
+        go.Bar(
+            x=effect_labels,
+            y=effect_values,
+            marker_color=effect_colors,
+            text=effect_values,
+            textposition='auto',
+            showlegend=False
+        ),
+        row=1, col=2
+    )
+
+    fig.update_layout(
+        title=dict(
+            text=f'清淤效果评估汇总（共 {total_dredge} 个清淤任务，已评估 {sum(effect_values)} 个）',
+            x=0.5,
+            xanchor='center',
+            font=dict(size=15)
+        ),
+        template='plotly_white',
+        height=420,
+        showlegend=False
+    )
+
+    fig.update_yaxes(title_text='任务数量', row=1, col=2)
+
+    return fig
+
