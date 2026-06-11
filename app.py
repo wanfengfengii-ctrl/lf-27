@@ -3163,6 +3163,7 @@ def handle_reassign_task(n_clicks, selected_ids, to_crew, schedule_date, current
         return dbc.Alert('请先选择目标班组', color='warning', duration=4000), dash.no_update
 
     schedule_df = GLOBAL_DATA['schedule_df']
+    crews_df = GLOBAL_DATA['crews_df']
     if schedule_df.empty:
         return dbc.Alert('暂无计划数据', color='warning', duration=4000), dash.no_update
 
@@ -3178,7 +3179,7 @@ def handle_reassign_task(n_clicks, selected_ids, to_crew, schedule_date, current
         from_crew = task_row.iloc[0]['班组编号']
         if from_crew == to_crew:
             continue
-        schedule_df, result = reassign_task(schedule_df, task_id, from_crew, to_crew, schedule_date_parsed)
+        schedule_df, result = reassign_task(schedule_df, task_id, from_crew, to_crew, schedule_date_parsed, crews_df)
         if result and result.get('success'):
             count += 1
 

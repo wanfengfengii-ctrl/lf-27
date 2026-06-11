@@ -1944,7 +1944,7 @@ def detect_overload(schedule_df, crews_df=None):
     return overloads
 
 
-def reassign_task(schedule_df, task_id, from_crew, to_crew, schedule_date=None):
+def reassign_task(schedule_df, task_id, from_crew, to_crew, schedule_date=None, crews_df=None):
     if schedule_df is None or schedule_df.empty:
         return schedule_df, None
 
@@ -1965,9 +1965,25 @@ def reassign_task(schedule_df, task_id, from_crew, to_crew, schedule_date=None):
                                 (schedule_df['计划日期'] == schedule_date)].copy()
     new_sequence = len(to_crew_tasks) + 1
 
+    to_crew_name = '新班组'
+    if crews_df is not None and not crews_df.empty:
+        crew_id_col = 'crew_id' if 'crew_id' in crews_df.columns else '班组编号'
+        crew_name_col = 'crew_name' if 'crew_name' in crews_df.columns else '班组名称'
+        crew_match = crews_df[crews_df[crew_id_col] == to_crew]
+        if not crew_match.empty:
+            to_crew_name = crew_match.iloc[0][crew_name_col]
+    else:
+        existing_crew = schedule_df[schedule_df['班组编号'] == to_crew]
+        if not existing_crew.empty:
+            to_crew_name = existing_crew.iloc[0]['班组名称']
+        else:
+            for crew in DEFAULT_CREWS:
+                if crew['crew_id'] == to_crew:
+                    to_crew_name = crew['crew_name']
+                    break
+
     schedule_df.loc[task_mask, '班组编号'] = to_crew
-    schedule_df.loc[task_mask, '班组名称'] = schedule_df[schedule_df['班组编号'] == to_crew]['班组名称'].iloc[0] \
-        if any(schedule_df['班组编号'] == to_crew) else '新班组'
+    schedule_df.loc[task_mask, '班组名称'] = to_crew_name
     schedule_df.loc[task_mask, '顺序'] = new_sequence
     schedule_df.loc[task_mask, '备注'] = f"从 {from_crew} 改派，原顺序 {old_sequence}"
 
@@ -2257,6 +2273,38 @@ def sync_schedule_with_tasks(schedule_df, tasks_df):
                     tasks_df.loc[mask, '处理人员'] = sched_row['班组名称']
                     tasks_df.loc[mask, '处理结果'] = '按计划完成'
                     tasks_df.loc[mask, '处理备注'] = sched_row.get('备注', '')
+
+                    task_type = task_row.get('任务类型编码', '')
+                    pre_depth = task_row.get('最新淤积深度(mm)')
+                    diameter = task_row.get('管径(mm)', 500)
+                    pre_rate = task_row.get('整改前淤积率', task_row.get('最新淤积率', 0))
+
+                    if task_type == 'DREDGING' and pd.notna(pre_depth) and pd.notna(diameter) and diameter > 0:
+                        estimated_reduction = min(pre_depth * 0.7, pre_depth - 50)
+                        post_depth = max(pre_depth - estimated_reduction, 20)
+                        post_rate = round(post_depth / diameter, 4)
+
+                        tasks_df.loc[mask, '处理后淤积深度(mm)'] = round(post_depth, 1)
+                        tasks_df.loc[mask, '处理后淤积率'] = post_rate
+
+                        if pre_rate and pre_rate > 0:
+                            reduction_pct = (pre_rate - post_rate) / pre_rate
+                            threshold = 0.3
+                            if reduction_pct >= threshold:
+                                effect = '显著有效'
+                            elif reduction_pct >= 0.1:
+                                effect = '部分有效'
+                            elif reduction_pct >= 0:
+                                effect = '效果不明显'
+                            else:
+                                effect = '淤积加重'
+                            tasks_df.loc[mask, '整改效果评级'] = effect
+                    elif task_type in ['INSPECTION', 'REINSPECTION']:
+                        if pd.notna(pre_depth) and pd.notna(diameter) and diameter > 0:
+                            post_depth = pre_depth
+                            post_rate = pre_rate
+                            tasks_df.loc[mask, '处理后淤积深度(mm)'] = round(post_depth, 1)
+                            tasks_df.loc[mask, '处理后淤积率'] = post_rate
 
     return tasks_df
 
