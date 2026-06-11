@@ -13,9 +13,31 @@ REQUIRED_COLUMNS = {
     '备注': ['备注', 'remark', 'notes', 'comment', '说明']
 }
 
+DEFAULT_RISK_RULES = {
+    'RISK_THRESHOLD_HIGH': 0.6,
+    'RISK_THRESHOLD_MEDIUM': 0.3,
+    'ABNORMAL_GROWTH_RATE': 0.2,
+    'MISSING_INSPECTION_ALERT': True,
+    'ABNORMAL_GROWTH_ALERT': True,
+    'HIGH_RISK_ALERT': True,
+    'DREDGING_EFFECT_THRESHOLD': 0.3,
+}
+
 RISK_THRESHOLD_HIGH = 0.6
 RISK_THRESHOLD_MEDIUM = 0.3
 ABNORMAL_GROWTH_RATE = 0.2
+
+
+def get_effective_rules(custom_rules=None):
+    rules = DEFAULT_RISK_RULES.copy()
+    if custom_rules:
+        for k, v in custom_rules.items():
+            if v is not None and v != '':
+                try:
+                    rules[k] = type(rules.get(k, v))(v)
+                except (ValueError, TypeError):
+                    rules[k] = v
+    return rules
 
 
 def standardize_columns(df):
@@ -26,37 +48,38 @@ def standardize_columns(df):
                 column_mapping[col] = std_name
                 break
     df = df.rename(columns=column_mapping)
-    
+
     missing_cols = set(REQUIRED_COLUMNS.keys()) - set(df.columns)
     missing_cols.discard('备注')
-    
+
     return df, missing_cols
 
 
-def validate_and_clean_data(df):
+def validate_and_clean_data(df, rules=None):
+    rules = get_effective_rules(rules)
     errors = []
     warnings = []
     valid_rows = []
-    
+
     if '片区' in df.columns:
         has_district = True
     else:
         has_district = False
         df['片区'] = '默认片区'
         warnings.append('数据中未包含"片区"字段，所有数据将归为默认片区')
-    
+
     for idx, row in df.iterrows():
         row_num = idx + 2
         row_errors = []
-        
+
         pipe_id = str(row.get('管段编号', '')).strip()
         if not pipe_id or pipe_id == 'nan':
             row_errors.append('管段编号为空')
-        
+
         batch = str(row.get('巡检批次', '')).strip()
         if not batch or batch == 'nan':
             row_errors.append('巡检批次为空')
-        
+
         try:
             check_date = pd.to_datetime(row.get('检查时间', ''))
             if pd.isna(check_date):
@@ -64,7 +87,7 @@ def validate_and_clean_data(df):
         except Exception:
             row_errors.append('检查时间格式无效')
             check_date = pd.NaT
-        
+
         try:
             sediment_depth = float(row.get('淤积深度', np.nan))
             if pd.isna(sediment_depth):
@@ -74,7 +97,7 @@ def validate_and_clean_data(df):
         except (ValueError, TypeError):
             row_errors.append('淤积深度不是有效数字')
             sediment_depth = np.nan
-        
+
         try:
             diameter = float(row.get('管径', np.nan))
             if pd.isna(diameter):
@@ -84,11 +107,11 @@ def validate_and_clean_data(df):
         except (ValueError, TypeError):
             row_errors.append('管径不是有效数字')
             diameter = np.nan
-        
+
         if not pd.isna(sediment_depth) and not pd.isna(diameter):
             if sediment_depth > diameter:
                 row_errors.append(f'淤积深度 ({sediment_depth}) 超过管径 ({diameter})')
-        
+
         if row_errors:
             errors.append({
                 '行号': row_num,
@@ -109,9 +132,9 @@ def validate_and_clean_data(df):
                 '淤积率': round(sediment_depth / diameter, 4) if diameter > 0 else 0
             }
             valid_rows.append(valid_row)
-    
+
     valid_df = pd.DataFrame(valid_rows)
-    
+
     if not valid_df.empty:
         dup_mask = valid_df.duplicated(subset=['管段编号', '巡检批次', '片区'], keep=False)
         duplicates = valid_df[dup_mask]
@@ -128,7 +151,7 @@ def validate_and_clean_data(df):
                     })
             valid_df = valid_df.drop_duplicates(subset=['管段编号', '巡检批次', '片区'], keep='first')
             warnings.append(f'发现 {len(duplicates) - len(duplicates.drop_duplicates(subset=["管段编号", "巡检批次", "片区"]))} 条重复记录，已保留第一条')
-    
+
     return valid_df, errors, warnings, has_district
 
 
@@ -153,74 +176,82 @@ def get_pipe_ids(df, district=None):
     return sorted(filtered['管段编号'].unique().tolist())
 
 
-def calculate_statistics(df, district=None, batches=None):
+def calculate_statistics(df, district=None, batches=None, rules=None):
+    rules = get_effective_rules(rules)
     if df.empty:
         return {}
-    
+
     filtered = df.copy()
     if district:
         filtered = filtered[filtered['片区'] == district]
     if batches:
         filtered = filtered[filtered['巡检批次'].isin(batches)]
-    
+
     if filtered.empty:
         return {}
-    
+
+    threshold_high = float(rules.get('RISK_THRESHOLD_HIGH', RISK_THRESHOLD_HIGH))
+    threshold_medium = float(rules.get('RISK_THRESHOLD_MEDIUM', RISK_THRESHOLD_MEDIUM))
+
     stats = {}
     stats['记录总数'] = len(filtered)
     stats['管段数量'] = filtered['管段编号'].nunique()
     stats['巡检批次数量'] = filtered['巡检批次'].nunique()
-    
+
     stats['最大淤积深度'] = round(filtered['淤积深度'].max(), 2)
     stats['平均淤积深度'] = round(filtered['淤积深度'].mean(), 2)
     stats['最大淤积率'] = round(filtered['淤积率'].max(), 4)
     stats['平均淤积率'] = round(filtered['淤积率'].mean(), 4)
-    
-    high_risk = filtered[filtered['淤积率'] >= RISK_THRESHOLD_HIGH]
-    medium_risk = filtered[(filtered['淤积率'] >= RISK_THRESHOLD_MEDIUM) & (filtered['淤积率'] < RISK_THRESHOLD_HIGH)]
-    low_risk = filtered[filtered['淤积率'] < RISK_THRESHOLD_MEDIUM]
-    
+
+    high_risk = filtered[filtered['淤积率'] >= threshold_high]
+    medium_risk = filtered[(filtered['淤积率'] >= threshold_medium) & (filtered['淤积率'] < threshold_high)]
+    low_risk = filtered[filtered['淤积率'] < threshold_medium]
+
     stats['高风险管段数'] = high_risk['管段编号'].nunique()
     stats['中风险管段数'] = medium_risk['管段编号'].nunique()
     stats['低风险管段数'] = low_risk['管段编号'].nunique()
-    
+
     stats['高风险记录数'] = len(high_risk)
     stats['中风险记录数'] = len(medium_risk)
     stats['低风险记录数'] = len(low_risk)
-    
+
     return stats
 
 
-def detect_abnormal_growth(df, district=None, batches=None):
+def detect_abnormal_growth(df, district=None, batches=None, rules=None):
+    rules = get_effective_rules(rules)
     if df.empty:
         return pd.DataFrame()
-    
+
     filtered = df.copy()
     if district:
         filtered = filtered[filtered['片区'] == district]
-    
+
     if filtered.empty:
         return pd.DataFrame()
-    
+
+    growth_rate_threshold = float(rules.get('ABNORMAL_GROWTH_RATE', ABNORMAL_GROWTH_RATE))
+    threshold_medium = float(rules.get('RISK_THRESHOLD_MEDIUM', RISK_THRESHOLD_MEDIUM))
+
     filtered = filtered.sort_values(['管段编号', '检查时间'])
     abnormal_pipes = []
-    
+
     for pipe_id, group in filtered.groupby('管段编号'):
         group = group.sort_values('检查时间')
         if len(group) >= 2:
             for i in range(1, len(group)):
                 prev_row = group.iloc[i - 1]
                 curr_row = group.iloc[i]
-                
+
                 if batches:
                     if prev_row['巡检批次'] not in batches or curr_row['巡检批次'] not in batches:
                         continue
-                
+
                 prev_rate = prev_row['淤积率']
                 curr_rate = curr_row['淤积率']
                 growth_rate = (curr_rate - prev_rate) / prev_rate if prev_rate > 0 else float('inf')
-                
-                if growth_rate >= ABNORMAL_GROWTH_RATE and curr_rate > RISK_THRESHOLD_MEDIUM:
+
+                if growth_rate >= growth_rate_threshold and curr_rate > threshold_medium:
                     abnormal_pipes.append({
                         '管段编号': pipe_id,
                         '片区': curr_row['片区'],
@@ -233,37 +264,39 @@ def detect_abnormal_growth(df, district=None, batches=None):
                         '前淤积深度': prev_row['淤积深度'],
                         '当前淤积深度': curr_row['淤积深度']
                     })
-    
+
     return pd.DataFrame(abnormal_pipes)
 
 
-def get_high_risk_segments(df, district=None, batches=None):
+def get_high_risk_segments(df, district=None, batches=None, rules=None):
+    rules = get_effective_rules(rules)
     if df.empty:
         return pd.DataFrame()
-    
+
     filtered = df.copy()
     if district:
         filtered = filtered[filtered['片区'] == district]
     if batches:
         filtered = filtered[filtered['巡检批次'].isin(batches)]
-    
+
     if filtered.empty:
         return pd.DataFrame()
-    
-    high_risk = filtered[filtered['淤积率'] >= RISK_THRESHOLD_HIGH].copy()
+
+    threshold_high = float(rules.get('RISK_THRESHOLD_HIGH', RISK_THRESHOLD_HIGH))
+    high_risk = filtered[filtered['淤积率'] >= threshold_high].copy()
     high_risk = high_risk.sort_values('淤积率', ascending=False)
-    
+
     return high_risk[['管段编号', '巡检批次', '检查时间', '淤积深度', '管径', '淤积率', '片区', '备注']]
 
 
 def get_pipe_history(df, pipe_id, district=None):
     if df.empty:
         return pd.DataFrame()
-    
+
     filtered = df[df['管段编号'] == pipe_id]
     if district:
         filtered = filtered[filtered['片区'] == district]
-    
+
     filtered = filtered.sort_values('检查时间')
     return filtered
 
@@ -271,50 +304,50 @@ def get_pipe_history(df, pipe_id, district=None):
 def get_risk_heatmap_data(df, district=None, batches=None):
     if df.empty:
         return pd.DataFrame()
-    
+
     filtered = df.copy()
     if district:
         filtered = filtered[filtered['片区'] == district]
     if batches:
         filtered = filtered[filtered['巡检批次'].isin(batches)]
-    
+
     if filtered.empty:
         return pd.DataFrame()
-    
+
     heatmap_data = filtered.pivot_table(
         index='管段编号',
         columns='巡检批次',
         values='淤积率',
         aggfunc='max'
     ).fillna(-1)
-    
+
     return heatmap_data
 
 
 def detect_missing_inspections(df, district=None, batches=None):
     if df.empty:
         return pd.DataFrame()
-    
+
     filtered = df.copy()
     if district:
         filtered = filtered[filtered['片区'] == district]
-    
+
     if filtered.empty:
         return pd.DataFrame()
-    
+
     if batches:
         check_batches = sorted([b for b in batches if b in filtered['巡检批次'].unique()])
     else:
         check_batches = sorted(filtered['巡检批次'].unique().tolist())
-    
+
     pipes_in_batches = filtered[filtered['巡检批次'].isin(check_batches)]['管段编号'].unique().tolist()
     all_pipes = sorted(pipes_in_batches)
-    
+
     missing_records = []
     for pipe_id in all_pipes:
         pipe_data = filtered[filtered['管段编号'] == pipe_id]
         pipe_batches = set(pipe_data['巡检批次'].tolist())
-        
+
         for batch in check_batches:
             if batch not in pipe_batches:
                 missing_records.append({
@@ -322,42 +355,43 @@ def detect_missing_inspections(df, district=None, batches=None):
                     '片区': district if district else pipe_data['片区'].iloc[0] if len(pipe_data) > 0 else '未知',
                     '缺失批次': batch
                 })
-    
+
     return pd.DataFrame(missing_records)
 
 
 def get_batch_comparison_data(df, pipe_ids, district=None):
     if df.empty or not pipe_ids:
         return pd.DataFrame()
-    
+
     filtered = df[df['管段编号'].isin(pipe_ids)]
     if district:
         filtered = filtered[filtered['片区'] == district]
-    
+
     return filtered.sort_values(['管段编号', '检查时间'])
 
 
-def revalidate_dataframe(df):
+def revalidate_dataframe(df, rules=None):
+    rules = get_effective_rules(rules)
     errors = []
     valid_rows = []
-    
+
     if '片区' not in df.columns:
         df['片区'] = '默认片区'
-    
+
     df = df.reset_index(drop=True)
-    
+
     for idx, row in df.iterrows():
         row_num = idx + 1
         row_errors = []
-        
+
         pipe_id = str(row.get('管段编号', '')).strip()
         if not pipe_id or pipe_id == 'nan':
             row_errors.append('管段编号为空')
-        
+
         batch = str(row.get('巡检批次', '')).strip()
         if not batch or batch == 'nan':
             row_errors.append('巡检批次为空')
-        
+
         try:
             check_date_val = row.get('检查时间', '')
             if pd.isna(check_date_val):
@@ -370,7 +404,7 @@ def revalidate_dataframe(df):
         except Exception:
             row_errors.append('检查时间格式无效')
             check_date = pd.NaT
-        
+
         try:
             sediment_val = row.get('淤积深度', np.nan)
             if pd.isna(sediment_val) or str(sediment_val).strip() == '':
@@ -383,7 +417,7 @@ def revalidate_dataframe(df):
         except (ValueError, TypeError):
             row_errors.append('淤积深度不是有效数字')
             sediment_depth = np.nan
-        
+
         try:
             diameter_val = row.get('管径', np.nan)
             if pd.isna(diameter_val) or str(diameter_val).strip() == '':
@@ -396,14 +430,14 @@ def revalidate_dataframe(df):
         except (ValueError, TypeError):
             row_errors.append('管径不是有效数字')
             diameter = np.nan
-        
+
         if not pd.isna(sediment_depth) and not pd.isna(diameter):
             if sediment_depth > diameter:
                 row_errors.append(f'淤积深度 ({sediment_depth}) 超过管径 ({diameter})')
-        
+
         remark = str(row.get('备注', '')) if pd.notna(row.get('备注', '')) else ''
         district_val = str(row.get('片区', '默认片区')) if pd.notna(row.get('片区', '默认片区')) else '默认片区'
-        
+
         if row_errors:
             errors.append({
                 '行号': row_num,
@@ -423,9 +457,9 @@ def revalidate_dataframe(df):
                 '片区': district_val,
                 '淤积率': round(sediment_depth / diameter, 4) if diameter > 0 else 0
             })
-    
+
     valid_df = pd.DataFrame(valid_rows)
-    
+
     if not valid_df.empty:
         dup_mask = valid_df.duplicated(subset=['管段编号', '巡检批次', '片区'], keep=False)
         duplicates = valid_df[dup_mask]
@@ -443,5 +477,501 @@ def revalidate_dataframe(df):
                     })
             valid_df = valid_df.drop_duplicates(subset=['管段编号', '巡检批次', '片区'], keep='first')
             errors.extend(duplicate_errors)
-    
+
     return valid_df, errors
+
+
+def validate_batch_data(df, batch_name=None, rules=None):
+    rules = get_effective_rules(rules)
+    if df.empty:
+        return pd.DataFrame(), [], []
+
+    filtered = df.copy()
+    if batch_name:
+        filtered = filtered[filtered['巡检批次'] == batch_name]
+
+    if filtered.empty:
+        return pd.DataFrame(), [], ['指定批次无数据']
+
+    errors = []
+    repaired_rows = []
+    repair_actions = []
+
+    threshold_high = float(rules.get('RISK_THRESHOLD_HIGH', RISK_THRESHOLD_HIGH))
+    threshold_medium = float(rules.get('RISK_THRESHOLD_MEDIUM', RISK_THRESHOLD_MEDIUM))
+
+    for idx, row in filtered.iterrows():
+        row_num = idx + 1
+        row_issues = []
+        row_repairs = []
+        modified = False
+
+        pipe_id = str(row.get('管段编号', '')).strip()
+        if not pipe_id or pipe_id == 'nan':
+            row_issues.append('管段编号为空')
+
+        batch = str(row.get('巡检批次', '')).strip()
+        if not batch or batch == 'nan':
+            row_issues.append('巡检批次为空')
+
+        check_date = row.get('检查时间', pd.NaT)
+        if pd.isna(check_date):
+            row_issues.append('检查时间为空')
+
+        sediment_depth = row.get('淤积深度', np.nan)
+        if pd.isna(sediment_depth):
+            row_issues.append('淤积深度为空')
+        else:
+            try:
+                sediment_depth = float(sediment_depth)
+                if sediment_depth < 0:
+                    sediment_depth = abs(sediment_depth)
+                    modified = True
+                    row_repairs.append(f'淤积深度取绝对值: {row.get("淤积深度")} → {sediment_depth}')
+            except (ValueError, TypeError):
+                row_issues.append('淤积深度非数字')
+
+        diameter = row.get('管径', np.nan)
+        if pd.isna(diameter):
+            row_issues.append('管径为空')
+        else:
+            try:
+                diameter = float(diameter)
+                if diameter <= 0:
+                    row_issues.append(f'管径无效 ({diameter})')
+            except (ValueError, TypeError):
+                row_issues.append('管径非数字')
+
+        sediment_rate = row.get('淤积率', np.nan)
+        if not pd.isna(sediment_depth) and not pd.isna(diameter) and diameter > 0:
+            calculated_rate = round(sediment_depth / diameter, 4)
+            if pd.isna(sediment_rate) or abs(calculated_rate - float(sediment_rate)) > 0.001:
+                modified = True
+                row_repairs.append(f'淤积率重算: {sediment_rate} → {calculated_rate}')
+                sediment_rate = calculated_rate
+
+        if not pd.isna(sediment_depth) and not pd.isna(diameter) and sediment_depth > diameter:
+            sediment_depth = diameter * 0.95
+            sediment_rate = round(sediment_depth / diameter, 4)
+            modified = True
+            row_repairs.append(f'淤积深度超过管径，修正为管径95%: {sediment_rate:.1%}')
+
+        district_val = str(row.get('片区', '默认片区')) if pd.notna(row.get('片区', '默认片区')) else '默认片区'
+        remark = str(row.get('备注', '')) if pd.notna(row.get('备注', '')) else ''
+
+        if row_issues:
+            errors.append({
+                '行号': row_num,
+                '管段编号': pipe_id if pipe_id else '未知',
+                '巡检批次': batch if batch else '未知',
+                '问题': '；'.join(row_issues),
+                '可修复': len(row_repairs) > 0
+            })
+
+        if row_issues and not row_repairs:
+            continue
+
+        repaired_rows.append({
+            '管段编号': pipe_id,
+            '片区': district_val,
+            '巡检批次': batch,
+            '检查时间': check_date,
+            '淤积深度': sediment_depth if not pd.isna(sediment_depth) else 0,
+            '管径': diameter if not pd.isna(diameter) else 0,
+            '淤积率': sediment_rate if not pd.isna(sediment_rate) else 0,
+            '备注': remark + (' [已修复]' if modified else ''),
+            '_modified': modified
+        })
+
+        if row_repairs:
+            repair_actions.append({
+                '行号': row_num,
+                '管段编号': pipe_id,
+                '修复操作': '；'.join(row_repairs)
+            })
+
+    repaired_df = pd.DataFrame(repaired_rows)
+    if not repaired_df.empty and '_modified' in repaired_df.columns:
+        repaired_df = repaired_df.drop(columns=['_modified'])
+
+    return repaired_df, errors, repair_actions
+
+
+def validate_cross_district(pipes_compare_ids, df):
+    if not pipes_compare_ids or df.empty:
+        return True, ''
+
+    pipe_districts = df[df['管段编号'].isin(pipes_compare_ids)].groupby('管段编号')['片区'].first()
+
+    districts_in_selection = pipe_districts.unique()
+    if len(districts_in_selection) > 1:
+        district_pipes = {}
+        for pid in pipes_compare_ids:
+            d = pipe_districts.get(pid, '未知')
+            if d not in district_pipes:
+                district_pipes[d] = []
+            district_pipes[d].append(pid)
+
+        detail = '；'.join([f'{d}区: {", ".join(pids)}' for d, pids in district_pipes.items()])
+        return False, f'禁止跨片区直接合并对比！所选管段跨越多个片区：{detail}。请按片区分别对比分析。'
+
+    return True, ''
+
+
+def evaluate_dredging_effect(df, pipe_id, pre_batch, post_batch, rules=None):
+    rules = get_effective_rules(rules)
+    if df.empty or not pipe_id:
+        return None
+
+    threshold = float(rules.get('DREDGING_EFFECT_THRESHOLD', 0.3))
+
+    pipe_data = df[df['管段编号'] == pipe_id].sort_values('检查时间')
+    if pipe_data.empty:
+        return None
+
+    pre_data = pipe_data[pipe_data['巡检批次'] == pre_batch]
+    post_data = pipe_data[pipe_data['巡检批次'] == post_batch]
+
+    if pre_data.empty or post_data.empty:
+        return None
+
+    pre_row = pre_data.iloc[0]
+    post_row = post_data.iloc[0]
+
+    pre_rate = pre_row['淤积率']
+    post_rate = post_row['淤积率']
+    pre_depth = pre_row['淤积深度']
+    post_depth = post_row['淤积深度']
+    diameter = pre_row['管径']
+
+    depth_reduction = pre_depth - post_depth
+    rate_reduction = pre_rate - post_rate
+    reduction_pct = rate_reduction / pre_rate if pre_rate > 0 else 0
+
+    if reduction_pct >= threshold:
+        effect_level = '显著有效'
+        effect_color = '#27ae60'
+    elif reduction_pct >= 0.1:
+        effect_level = '部分有效'
+        effect_color = '#f39c12'
+    elif reduction_pct >= 0:
+        effect_level = '效果不明显'
+        effect_color = '#e67e22'
+    else:
+        effect_level = '淤积加重'
+        effect_color = '#e74c3c'
+
+    suggestion = _generate_dredging_suggestion(post_rate, reduction_pct, rules)
+
+    return {
+        '管段编号': pipe_id,
+        '片区': pre_row['片区'],
+        '清淤前批次': pre_batch,
+        '清淤后批次': post_batch,
+        '清淤前淤积深度': round(pre_depth, 2),
+        '清淤后淤积深度': round(post_depth, 2),
+        '深度减少量': round(depth_reduction, 2),
+        '清淤前淤积率': round(pre_rate, 4),
+        '清淤后淤积率': round(post_rate, 4),
+        '淤积率降幅': round(rate_reduction, 4),
+        '降幅百分比': round(reduction_pct, 4),
+        '效果评级': effect_level,
+        '效果颜色': effect_color,
+        '处理建议': suggestion
+    }
+
+
+def batch_evaluate_dredging(df, rules=None):
+    rules = get_effective_rules(rules)
+    if df.empty:
+        return pd.DataFrame()
+
+    results = []
+    for pipe_id in df['管段编号'].unique():
+        pipe_data = df[df['管段编号'] == pipe_id].sort_values('检查时间')
+        if len(pipe_data) < 2:
+            continue
+
+        for i in range(1, len(pipe_data)):
+            prev_row = pipe_data.iloc[i - 1]
+            curr_row = pipe_data.iloc[i]
+
+            prev_rate = prev_row['淤积率']
+            curr_rate = curr_row['淤积率']
+
+            if curr_rate < prev_rate and prev_rate > 0:
+                depth_reduction = prev_row['淤积深度'] - curr_row['淤积深度']
+                rate_reduction = prev_rate - curr_rate
+                reduction_pct = rate_reduction / prev_rate
+
+                if reduction_pct >= 0.05:
+                    result = evaluate_dredging_effect(
+                        df, pipe_id,
+                        prev_row['巡检批次'], curr_row['巡检批次'],
+                        rules
+                    )
+                    if result:
+                        results.append(result)
+
+    if not results:
+        return pd.DataFrame()
+
+    return pd.DataFrame(results).sort_values('降幅百分比', ascending=False)
+
+
+def calculate_dredging_priority(df, rules=None):
+    rules = get_effective_rules(rules)
+    if df.empty:
+        return pd.DataFrame()
+
+    threshold_high = float(rules.get('RISK_THRESHOLD_HIGH', RISK_THRESHOLD_HIGH))
+    threshold_medium = float(rules.get('RISK_THRESHOLD_MEDIUM', RISK_THRESHOLD_MEDIUM))
+    growth_threshold = float(rules.get('ABNORMAL_GROWTH_RATE', ABNORMAL_GROWTH_RATE))
+
+    latest_per_pipe = df.sort_values('检查时间').groupby('管段编号').last().reset_index()
+
+    priority_records = []
+    for _, row in latest_per_pipe.iterrows():
+        pipe_id = row['管段编号']
+        current_rate = row['淤积率']
+        current_depth = row['淤积深度']
+        diameter = row['管径']
+        district = row['片区']
+
+        pipe_history = df[df['管段编号'] == pipe_id].sort_values('检查时间')
+
+        growth_rate = 0
+        if len(pipe_history) >= 2:
+            prev_rate = pipe_history.iloc[-2]['淤积率']
+            if prev_rate > 0:
+                growth_rate = (current_rate - prev_rate) / prev_rate
+
+        is_abnormal = growth_rate >= growth_threshold
+        is_missing = len(pipe_history) < df['巡检批次'].nunique()
+
+        risk_score = 0
+        if current_rate >= threshold_high:
+            risk_score += 40
+        elif current_rate >= threshold_medium:
+            risk_score += 20
+
+        risk_score += min(growth_rate * 30, 25)
+
+        if is_abnormal:
+            risk_score += 20
+        if is_missing:
+            risk_score += 10
+
+        if current_rate >= threshold_high and is_abnormal:
+            priority_level = '紧急'
+        elif current_rate >= threshold_high:
+            priority_level = '高'
+        elif current_rate >= threshold_medium and is_abnormal:
+            priority_level = '高'
+        elif current_rate >= threshold_medium:
+            priority_level = '中'
+        elif is_abnormal:
+            priority_level = '中'
+        else:
+            priority_level = '低'
+
+        suggestion = _generate_dredging_suggestion(current_rate, growth_rate, rules)
+
+        priority_records.append({
+            '管段编号': pipe_id,
+            '片区': district,
+            '最新淤积率': round(current_rate, 4),
+            '最新淤积深度': round(current_depth, 2),
+            '管径': diameter,
+            '增长率': round(growth_rate, 4),
+            '异常增长': '是' if is_abnormal else '否',
+            '巡检缺失': '是' if is_missing else '否',
+            '风险评分': round(risk_score, 1),
+            '清淤优先级': priority_level,
+            '处理建议': suggestion
+        })
+
+    priority_df = pd.DataFrame(priority_records)
+    if not priority_df.empty:
+        priority_order = {'紧急': 0, '高': 1, '中': 2, '低': 3}
+        priority_df['_sort'] = priority_df['清淤优先级'].map(priority_order)
+        priority_df = priority_df.sort_values(['_sort', '风险评分'], ascending=[True, False])
+        priority_df = priority_df.drop(columns=['_sort'])
+
+    return priority_df
+
+
+def _generate_dredging_suggestion(current_rate, reduction_or_growth, rules=None):
+    rules = get_effective_rules(rules)
+    threshold_high = float(rules.get('RISK_THRESHOLD_HIGH', RISK_THRESHOLD_HIGH))
+    threshold_medium = float(rules.get('RISK_THRESHOLD_MEDIUM', RISK_THRESHOLD_MEDIUM))
+
+    if current_rate >= threshold_high:
+        return '建议立即安排清淤作业，优先使用高压冲洗方式，清理后安排复检确认效果'
+    elif current_rate >= threshold_medium:
+        if reduction_or_growth > 0.2:
+            return '淤积增长较快，建议近期安排清淤，可采用机械清淤方式，并加密巡检频次'
+        return '建议列入本季度清淤计划，采用常规清淤方式处理'
+    else:
+        if reduction_or_growth > 0.2:
+            return '淤积增长较快但尚在安全范围，建议加强监控，缩短巡检周期至每月一次'
+        return '暂无需清淤，保持当前巡检频率即可'
+
+
+def generate_inspection_quality_report(df, rules=None):
+    rules = get_effective_rules(rules)
+    if df.empty:
+        return {}
+
+    report = {}
+
+    total_records = len(df)
+    total_pipes = df['管段编号'].nunique()
+    total_batches = df['巡检批次'].nunique()
+    total_districts = df['片区'].nunique()
+
+    report['总览'] = {
+        '记录总数': total_records,
+        '管段总数': total_pipes,
+        '巡检批次数': total_batches,
+        '片区数': total_districts
+    }
+
+    missing_df = detect_missing_inspections(df)
+    missing_count = len(missing_df)
+    expected_records = total_pipes * total_batches
+    coverage_rate = (total_records / expected_records * 100) if expected_records > 0 else 100
+
+    report['巡检覆盖率'] = {
+        '应检记录数': expected_records,
+        '实检记录数': total_records,
+        '覆盖率': f'{coverage_rate:.1f}%',
+        '缺失巡检数': missing_count
+    }
+
+    if missing_count > 0:
+        missing_by_district = missing_df.groupby('片区').size().to_dict()
+        missing_by_batch = missing_df.groupby('缺失批次').size().to_dict()
+        report['巡检覆盖率']['按片区缺失'] = missing_by_district
+        report['巡检覆盖率']['按批次缺失'] = missing_by_batch
+
+    abnormal_df = detect_abnormal_growth(df, rules=rules)
+    report['异常增长统计'] = {
+        '异常增长管段数': abnormal_df['管段编号'].nunique() if not abnormal_df.empty else 0,
+        '异常增长记录数': len(abnormal_df)
+    }
+
+    if not abnormal_df.empty:
+        abnormal_by_district = abnormal_df.groupby('片区')['管段编号'].nunique().to_dict()
+        report['异常增长统计']['按片区统计'] = abnormal_by_district
+
+    threshold_high = float(rules.get('RISK_THRESHOLD_HIGH', RISK_THRESHOLD_HIGH))
+    high_risk_df = df[df['淤积率'] >= threshold_high]
+    report['高风险统计'] = {
+        '高风险管段数': high_risk_df['管段编号'].nunique(),
+        '高风险记录数': len(high_risk_df)
+    }
+
+    if not high_risk_df.empty:
+        high_risk_by_district = high_risk_df.groupby('片区')['管段编号'].nunique().to_dict()
+        report['高风险统计']['按片区统计'] = high_risk_by_district
+
+    depth_negative = df[df['淤积深度'] < 0]
+    rate_over_one = df[df['淤积率'] > 1]
+    report['数据质量'] = {
+        '淤积深度为负': len(depth_negative),
+        '淤积率超100%': len(rate_over_one),
+        '重复记录': len(df[df.duplicated(subset=['管段编号', '巡检批次', '片区'], keep=False)])
+    }
+
+    quality_issues = []
+    if coverage_rate < 90:
+        quality_issues.append(f'巡检覆盖率仅{coverage_rate:.1f}%，低于90%标准，存在{missing_count}条缺失巡检')
+    if not abnormal_df.empty and abnormal_df['管段编号'].nunique() > total_pipes * 0.2:
+        quality_issues.append(f'异常增长管段占比超过20%，需关注巡检数据准确性')
+    if len(depth_negative) > 0:
+        quality_issues.append(f'存在{len(depth_negative)}条淤积深度为负的异常记录')
+    if len(rate_over_one) > 0:
+        quality_issues.append(f'存在{len(rate_over_one)}条淤积率超100%的异常记录')
+
+    if not quality_issues:
+        quality_issues.append('巡检数据整体质量良好，未发现重大质量问题')
+
+    report['质量评估结论'] = quality_issues
+
+    return report
+
+
+def merge_repaired_batch(original_df, repaired_df, batch_name=None):
+    if original_df is None or original_df.empty:
+        return repaired_df if repaired_df is not None else pd.DataFrame()
+
+    if repaired_df is None or repaired_df.empty:
+        if batch_name:
+            return original_df[original_df['巡检批次'] != batch_name].copy()
+        return original_df.copy()
+
+    result = original_df.copy()
+
+    if batch_name:
+        result = result[result['巡检批次'] != batch_name]
+
+    result = pd.concat([result, repaired_df], ignore_index=True)
+    result = result.sort_values(['片区', '管段编号', '检查时间']).reset_index(drop=True)
+
+    return result
+
+
+def merge_edited_subset(original_df, edited_df, district=None, batches=None):
+    if original_df is None or original_df.empty:
+        return edited_df if edited_df is not None else pd.DataFrame()
+
+    if edited_df is None:
+        return original_df.copy()
+
+    result = original_df.copy()
+
+    mask = pd.Series([True] * len(result), index=result.index)
+    if district:
+        mask &= (result['片区'] == district)
+    if batches:
+        mask &= result['巡检批次'].isin(batches)
+
+    result = result[~mask]
+
+    if not edited_df.empty:
+        result = pd.concat([result, edited_df], ignore_index=True)
+
+    result = result.sort_values(['片区', '管段编号', '检查时间']).reset_index(drop=True)
+
+    return result
+
+
+def get_district_summary(df, rules=None):
+    rules = get_effective_rules(rules)
+    if df.empty:
+        return pd.DataFrame()
+
+    threshold_high = float(rules.get('RISK_THRESHOLD_HIGH', RISK_THRESHOLD_HIGH))
+    threshold_medium = float(rules.get('RISK_THRESHOLD_MEDIUM', RISK_THRESHOLD_MEDIUM))
+
+    summaries = []
+    for district in df['片区'].unique():
+        district_data = df[df['片区'] == district]
+        stats = calculate_statistics(district_data, rules=rules)
+        abnormal = detect_abnormal_growth(district_data, rules=rules)
+        missing = detect_missing_inspections(district_data)
+
+        summaries.append({
+            '片区': district,
+            '管段数': district_data['管段编号'].nunique(),
+            '记录数': len(district_data),
+            '平均淤积率': round(district_data['淤积率'].mean(), 4),
+            '最大淤积率': round(district_data['淤积率'].max(), 4),
+            '高风险管段数': stats.get('高风险管段数', 0),
+            '中风险管段数': stats.get('中风险管段数', 0),
+            '异常增长数': len(abnormal),
+            '缺失巡检数': len(missing)
+        })
+
+    return pd.DataFrame(summaries)

@@ -11,7 +11,8 @@ from data_processor import (
     get_batch_comparison_data,
     get_risk_heatmap_data,
     detect_missing_inspections,
-    get_batches
+    get_batches,
+    get_effective_rules
 )
 
 COLOR_SCALE_RISK = [
@@ -22,20 +23,23 @@ COLOR_SCALE_RISK = [
 ]
 
 
-def create_pipe_history_chart(df, pipe_id, district=None):
+def create_pipe_history_chart(df, pipe_id, district=None, rules=None):
+    rules = get_effective_rules(rules)
     history = get_pipe_history(df, pipe_id, district)
-    
+
     if history.empty:
         fig = go.Figure()
         fig.update_layout(
             title=f'管段 {pipe_id} 无数据',
             template='plotly_white',
-            height=400
+            height=600
         )
         return fig
-    
+
     all_batches = get_batches(df, district)
-    
+    threshold_high = float(rules.get('RISK_THRESHOLD_HIGH', RISK_THRESHOLD_HIGH))
+    threshold_medium = float(rules.get('RISK_THRESHOLD_MEDIUM', RISK_THRESHOLD_MEDIUM))
+
     fig = make_subplots(
         rows=2, cols=1,
         shared_xaxes=True,
@@ -43,7 +47,7 @@ def create_pipe_history_chart(df, pipe_id, district=None):
         subplot_titles=('淤积深度变化 (mm)', '淤积率变化 (%)'),
         row_heights=[0.55, 0.45]
     )
-    
+
     fig.add_trace(
         go.Scatter(
             x=history['巡检批次'],
@@ -66,7 +70,7 @@ def create_pipe_history_chart(df, pipe_id, district=None):
         ),
         row=1, col=1
     )
-    
+
     fig.add_hline(
         y=history['管径'].iloc[0] if len(history) > 0 else 0,
         line_dash='dash',
@@ -75,7 +79,7 @@ def create_pipe_history_chart(df, pipe_id, district=None):
         annotation_position='top right',
         row=1, col=1
     )
-    
+
     fig.add_trace(
         go.Scatter(
             x=history['巡检批次'],
@@ -93,35 +97,35 @@ def create_pipe_history_chart(df, pipe_id, district=None):
         ),
         row=2, col=1
     )
-    
+
     fig.add_hline(
-        y=RISK_THRESHOLD_HIGH * 100,
+        y=threshold_high * 100,
         line_dash='dash',
         line_color='#e74c3c',
-        annotation_text=f'高风险线 ({RISK_THRESHOLD_HIGH*100:.0f}%)',
+        annotation_text=f'高风险线 ({threshold_high*100:.0f}%)',
         annotation_position='top right',
         row=2, col=1
     )
     fig.add_hline(
-        y=RISK_THRESHOLD_MEDIUM * 100,
+        y=threshold_medium * 100,
         line_dash='dash',
         line_color='#f39c12',
-        annotation_text=f'中风险线 ({RISK_THRESHOLD_MEDIUM*100:.0f}%)',
+        annotation_text=f'中风险线 ({threshold_medium*100:.0f}%)',
         annotation_position='bottom right',
         row=2, col=1
     )
-    
+
     if all_batches and len(history) < len(all_batches):
         existing_batches = set(history['巡检批次'].tolist())
         missing_batches = [b for b in all_batches if b not in existing_batches]
-        
+
         if missing_batches:
             y_depth_min = history['淤积深度'].min() if len(history) > 0 else 0
             y_depth_marker = max(0, y_depth_min * 0.1)
-            
+
             y_rate_min = history['淤积率'].min() * 100 if len(history) > 0 else 0
             y_rate_marker = max(0, y_rate_min * 0.1)
-            
+
             fig.add_trace(
                 go.Scatter(
                     x=missing_batches,
@@ -141,7 +145,7 @@ def create_pipe_history_chart(df, pipe_id, district=None):
                 ),
                 row=1, col=1
             )
-            
+
             fig.add_trace(
                 go.Scatter(
                     x=missing_batches,
@@ -162,7 +166,7 @@ def create_pipe_history_chart(df, pipe_id, district=None):
                 ),
                 row=2, col=1
             )
-    
+
     fig.update_layout(
         title=dict(
             text=f'管段淤积过程分析 - {pipe_id}' + (f'（片区：{district}）' if district else ''),
@@ -182,17 +186,18 @@ def create_pipe_history_chart(df, pipe_id, district=None):
         ),
         showlegend=True
     )
-    
+
     fig.update_yaxes(title_text='淤积深度 (mm)', row=1, col=1)
     fig.update_yaxes(title_text='淤积率 (%)', row=2, col=1)
     fig.update_xaxes(title_text='巡检批次', row=2, col=1)
-    
+
     return fig
 
 
-def create_pipes_comparison_chart(df, pipe_ids, district=None, compare_by='淤积率'):
+def create_pipes_comparison_chart(df, pipe_ids, district=None, compare_by='淤积率', rules=None):
+    rules = get_effective_rules(rules)
     comparison_data = get_batch_comparison_data(df, pipe_ids, district)
-    
+
     if comparison_data.empty or not pipe_ids:
         fig = go.Figure()
         fig.update_layout(
@@ -201,16 +206,19 @@ def create_pipes_comparison_chart(df, pipe_ids, district=None, compare_by='淤�
             height=450
         )
         return fig
-    
+
+    threshold_high = float(rules.get('RISK_THRESHOLD_HIGH', RISK_THRESHOLD_HIGH))
+    threshold_medium = float(rules.get('RISK_THRESHOLD_MEDIUM', RISK_THRESHOLD_MEDIUM))
+
     fig = go.Figure()
-    
+
     colors = px.colors.qualitative.Plotly
     for i, pipe_id in enumerate(pipe_ids):
         pipe_data = comparison_data[comparison_data['管段编号'] == pipe_id]
-        
+
         y_values = pipe_data['淤积率'] * 100 if compare_by == '淤积率' else pipe_data['淤积深度']
         y_unit = '%' if compare_by == '淤积率' else ' mm'
-        
+
         fig.add_trace(
             go.Scatter(
                 x=pipe_data['巡检批次'],
@@ -230,10 +238,11 @@ def create_pipes_comparison_chart(df, pipe_ids, district=None, compare_by='淤�
                 customdata=pipe_data[['管径', '淤积率', '检查时间']].values
             )
         )
-    
+
+    district_label = f' - 片区：{district}' if district else ' - 全部片区'
     fig.update_layout(
         title=dict(
-            text=f'多管段淤积对比分析（按{compare_by}）' + (f' - 片区：{district}' if district else ''),
+            text=f'多管段淤积对比分析（按{compare_by}）' + district_label,
             x=0.5,
             xanchor='center',
             font=dict(size=16)
@@ -252,29 +261,30 @@ def create_pipes_comparison_chart(df, pipe_ids, district=None, compare_by='淤�
             x=1
         )
     )
-    
+
     if compare_by == '淤积率':
         fig.add_hline(
-            y=RISK_THRESHOLD_HIGH * 100,
+            y=threshold_high * 100,
             line_dash='dash',
             line_color='#e74c3c',
             annotation_text=f'高风险线',
             annotation_position='top right'
         )
         fig.add_hline(
-            y=RISK_THRESHOLD_MEDIUM * 100,
+            y=threshold_medium * 100,
             line_dash='dash',
             line_color='#f39c12',
             annotation_text=f'中风险线',
             annotation_position='bottom right'
         )
-    
+
     return fig
 
 
-def create_risk_heatmap(df, district=None, batches=None):
+def create_risk_heatmap(df, district=None, batches=None, rules=None):
+    rules = get_effective_rules(rules)
     heatmap_data = get_risk_heatmap_data(df, district, batches)
-    
+
     if heatmap_data.empty:
         fig = go.Figure()
         fig.update_layout(
@@ -283,23 +293,26 @@ def create_risk_heatmap(df, district=None, batches=None):
             height=500
         )
         return fig
-    
+
     display_data = heatmap_data.copy()
     display_data = display_data * 100
-    
+
     text_data = display_data.map(lambda x: '缺失' if x < 0 else f'{x:.1f}%')
-    
+
+    threshold_high = float(rules.get('RISK_THRESHOLD_HIGH', RISK_THRESHOLD_HIGH))
+    threshold_medium = float(rules.get('RISK_THRESHOLD_MEDIUM', RISK_THRESHOLD_MEDIUM))
+
     colorscale = [
         [0.0, '#d5dbdb'],
         [0.0001, '#2ecc71'],
-        [0.3, '#f1c40f'],
-        [0.6, '#e67e22'],
+        [threshold_medium, '#f1c40f'],
+        [threshold_high, '#e67e22'],
         [1.0, '#e74c3c']
     ]
-    
+
     display_data_for_plot = display_data.copy()
     display_data_for_plot[display_data_for_plot < 0] = -5
-    
+
     fig = go.Figure(
         data=go.Heatmap(
             z=display_data_for_plot.values,
@@ -312,8 +325,8 @@ def create_risk_heatmap(df, district=None, batches=None):
             zmax=100,
             colorbar=dict(
                 title=dict(text='淤积率 (%)', side='right'),
-                tickvals=[0, 30, 60, 100],
-                ticktext=['0%', '30%', '60%', '100%'],
+                tickvals=[0, threshold_medium * 100, threshold_high * 100, 100],
+                ticktext=[f'0%', f'{threshold_medium*100:.0f}%', f'{threshold_high*100:.0f}%', '100%'],
                 lenmode='pixels',
                 len=300
             ),
@@ -324,7 +337,7 @@ def create_risk_heatmap(df, district=None, batches=None):
             )
         )
     )
-    
+
     fig.update_layout(
         title=dict(
             text='风险分布热力图' + (f' - 片区：{district}' if district else ''),
@@ -343,11 +356,12 @@ def create_risk_heatmap(df, district=None, batches=None):
             autorange='reversed'
         )
     )
-    
+
     return fig
 
 
-def create_risk_distribution_chart(stats):
+def create_risk_distribution_chart(stats, rules=None):
+    rules = get_effective_rules(rules)
     if not stats:
         fig = go.Figure()
         fig.update_layout(
@@ -356,17 +370,17 @@ def create_risk_distribution_chart(stats):
             height=350
         )
         return fig
-    
+
     labels = ['高风险', '中风险', '低风险']
     values = [stats.get('高风险管段数', 0), stats.get('中风险管段数', 0), stats.get('低风险管段数', 0)]
     colors = ['#e74c3c', '#f39c12', '#2ecc71']
-    
+
     fig = make_subplots(
         rows=1, cols=2,
         specs=[[{'type': 'pie'}, {'type': 'bar'}]],
         subplot_titles=('风险等级分布（管段数）', '各风险等级管段数统计')
     )
-    
+
     fig.add_trace(
         go.Pie(
             labels=labels,
@@ -378,7 +392,7 @@ def create_risk_distribution_chart(stats):
         ),
         row=1, col=1
     )
-    
+
     fig.add_trace(
         go.Bar(
             x=labels,
@@ -390,7 +404,7 @@ def create_risk_distribution_chart(stats):
         ),
         row=1, col=2
     )
-    
+
     fig.update_layout(
         title=dict(
             text='管段风险分布总览',
@@ -402,11 +416,12 @@ def create_risk_distribution_chart(stats):
         height=400,
         showlegend=False
     )
-    
+
     return fig
 
 
-def create_sediment_trend_chart(df, district=None, batches=None):
+def create_sediment_trend_chart(df, district=None, batches=None, rules=None):
+    rules = get_effective_rules(rules)
     if df.empty:
         fig = go.Figure()
         fig.update_layout(
@@ -415,29 +430,32 @@ def create_sediment_trend_chart(df, district=None, batches=None):
             height=400
         )
         return fig
-    
+
     filtered = df.copy()
     if district:
         filtered = filtered[filtered['片区'] == district]
     if batches:
         filtered = filtered[filtered['巡检批次'].isin(batches)]
-    
+
     if filtered.empty:
         fig = go.Figure()
         fig.update_layout(title='无数据', template='plotly_white', height=400)
         return fig
-    
+
+    threshold_high = float(rules.get('RISK_THRESHOLD_HIGH', RISK_THRESHOLD_HIGH))
+    threshold_medium = float(rules.get('RISK_THRESHOLD_MEDIUM', RISK_THRESHOLD_MEDIUM))
+
     batch_stats = filtered.groupby('巡检批次').agg(
         平均淤积率=('淤积率', 'mean'),
         最大淤积率=('淤积率', 'max'),
         中位数淤积率=('淤积率', 'median'),
         管段数=('管段编号', 'nunique')
     ).reset_index()
-    
+
     batch_stats = batch_stats.sort_values('巡检批次')
-    
+
     fig = go.Figure()
-    
+
     fig.add_trace(
         go.Scatter(
             x=batch_stats['巡检批次'],
@@ -450,7 +468,7 @@ def create_sediment_trend_chart(df, district=None, batches=None):
             textposition='top center'
         )
     )
-    
+
     fig.add_trace(
         go.Scatter(
             x=batch_stats['巡检批次'],
@@ -463,7 +481,7 @@ def create_sediment_trend_chart(df, district=None, batches=None):
             textposition='top center'
         )
     )
-    
+
     fig.add_trace(
         go.Scatter(
             x=batch_stats['巡检批次'],
@@ -476,7 +494,7 @@ def create_sediment_trend_chart(df, district=None, batches=None):
             textposition='bottom center'
         )
     )
-    
+
     fig.update_layout(
         title=dict(
             text='区域淤积趋势分析' + (f' - 片区：{district}' if district else ''),
@@ -497,9 +515,9 @@ def create_sediment_trend_chart(df, district=None, batches=None):
             x=1
         )
     )
-    
+
     fig.add_hline(
-        y=RISK_THRESHOLD_HIGH * 100,
+        y=threshold_high * 100,
         line_dash='dash',
         line_color='#e74c3c',
         opacity=0.5,
@@ -507,12 +525,250 @@ def create_sediment_trend_chart(df, district=None, batches=None):
         annotation_position='top right'
     )
     fig.add_hline(
-        y=RISK_THRESHOLD_MEDIUM * 100,
+        y=threshold_medium * 100,
         line_dash='dash',
         line_color='#f39c12',
         opacity=0.5,
         annotation_text='中风险线',
         annotation_position='bottom right'
     )
-    
+
+    return fig
+
+
+def create_dredging_effect_chart(dredging_results, rules=None):
+    if dredging_results is None or (isinstance(dredging_results, pd.DataFrame) and dredging_results.empty):
+        fig = go.Figure()
+        fig.update_layout(
+            title='无清淤效果评估数据',
+            template='plotly_white',
+            height=500
+        )
+        return fig
+
+    if isinstance(dredging_results, dict):
+        dredging_results = pd.DataFrame([dredging_results])
+
+    if dredging_results.empty:
+        fig = go.Figure()
+        fig.update_layout(title='无清淤效果数据', template='plotly_white', height=500)
+        return fig
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        specs=[[{'type': 'xy'}, {'type': 'domain'}]],
+        subplot_titles=('清淤前后淤积率对比', '清淤效果分布')
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=dredging_results['管段编号'],
+            y=dredging_results['清淤前淤积率'] * 100,
+            name='清淤前',
+            marker_color='#e74c3c',
+            text=dredging_results['清淤前淤积率'].apply(lambda x: f'{x*100:.1f}%'),
+            textposition='auto'
+        ),
+        row=1, col=1
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=dredging_results['管段编号'],
+            y=dredging_results['清淤后淤积率'] * 100,
+            name='清淤后',
+            marker_color='#27ae60',
+            text=dredging_results['清淤后淤积率'].apply(lambda x: f'{x*100:.1f}%'),
+            textposition='auto'
+        ),
+        row=1, col=1
+    )
+
+    effect_counts = dredging_results['效果评级'].value_counts()
+    effect_colors = {
+        '显著有效': '#27ae60',
+        '部分有效': '#f39c12',
+        '效果不明显': '#e67e22',
+        '淤积加重': '#e74c3c'
+    }
+
+    fig.add_trace(
+        go.Pie(
+            labels=effect_counts.index.tolist(),
+            values=effect_counts.values.tolist(),
+            marker_colors=[effect_colors.get(l, '#95a5a6') for l in effect_counts.index],
+            textinfo='label+percent+value',
+            hole=0.4
+        ),
+        row=1, col=2
+    )
+
+    fig.update_layout(
+        title=dict(
+            text='清淤前后效果评估',
+            x=0.5,
+            xanchor='center',
+            font=dict(size=16)
+        ),
+        template='plotly_white',
+        height=500,
+        showlegend=True,
+        barmode='group'
+    )
+
+    fig.update_yaxes(title_text='淤积率 (%)', row=1, col=1)
+    fig.update_xaxes(title_text='管段编号', row=1, col=1)
+
+    return fig
+
+
+def create_district_comparison_chart(district_summary_df, rules=None):
+    if district_summary_df is None or district_summary_df.empty:
+        fig = go.Figure()
+        fig.update_layout(
+            title='无片区对比数据',
+            template='plotly_white',
+            height=500
+        )
+        return fig
+
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=('各片区平均淤积率', '各片区高风险管段数', '各片区异常增长数', '各片区缺失巡检数'),
+        vertical_spacing=0.12
+    )
+
+    colors = px.colors.qualitative.Set2
+
+    fig.add_trace(
+        go.Bar(
+            x=district_summary_df['片区'],
+            y=district_summary_df['平均淤积率'] * 100,
+            marker_color=colors[0],
+            text=district_summary_df['平均淤积率'].apply(lambda x: f'{x*100:.1f}%'),
+            textposition='auto',
+            showlegend=False
+        ),
+        row=1, col=1
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=district_summary_df['片区'],
+            y=district_summary_df['高风险管段数'],
+            marker_color='#e74c3c',
+            text=district_summary_df['高风险管段数'],
+            textposition='auto',
+            showlegend=False
+        ),
+        row=1, col=2
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=district_summary_df['片区'],
+            y=district_summary_df['异常增长数'],
+            marker_color='#e67e22',
+            text=district_summary_df['异常增长数'],
+            textposition='auto',
+            showlegend=False
+        ),
+        row=2, col=1
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=district_summary_df['片区'],
+            y=district_summary_df['缺失巡检数'],
+            marker_color='#7f8c8d',
+            text=district_summary_df['缺失巡检数'],
+            textposition='auto',
+            showlegend=False
+        ),
+        row=2, col=2
+    )
+
+    fig.update_yaxes(title_text='淤积率 (%)', row=1, col=1)
+    fig.update_yaxes(title_text='管段数', row=1, col=2)
+    fig.update_yaxes(title_text='管段数', row=2, col=1)
+    fig.update_yaxes(title_text='缺失数', row=2, col=2)
+
+    fig.update_layout(
+        title=dict(
+            text='跨片区隔离分析（各片区独立统计，禁止合并对比）',
+            x=0.5,
+            xanchor='center',
+            font=dict(size=16)
+        ),
+        template='plotly_white',
+        height=700,
+        showlegend=False
+    )
+
+    return fig
+
+
+def create_priority_dashboard_chart(priority_df, rules=None):
+    if priority_df is None or priority_df.empty:
+        fig = go.Figure()
+        fig.update_layout(
+            title='无优先级数据',
+            template='plotly_white',
+            height=500
+        )
+        return fig
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        specs=[[{'type': 'domain'}, {'type': 'xy'}]],
+        subplot_titles=('清淤优先级分布', '管段风险评分排名（Top 15）')
+    )
+
+    priority_counts = priority_df['清淤优先级'].value_counts()
+    priority_colors = {
+        '紧急': '#c0392b',
+        '高': '#e74c3c',
+        '中': '#f39c12',
+        '低': '#27ae60'
+    }
+
+    fig.add_trace(
+        go.Pie(
+            labels=priority_counts.index.tolist(),
+            values=priority_counts.values.tolist(),
+            marker_colors=[priority_colors.get(l, '#95a5a6') for l in priority_counts.index],
+            textinfo='label+percent+value',
+            hole=0.4
+        ),
+        row=1, col=1
+    )
+
+    top_pipes = priority_df.head(15)
+    fig.add_trace(
+        go.Bar(
+            x=top_pipes['管段编号'],
+            y=top_pipes['风险评分'],
+            marker_color=[priority_colors.get(p, '#95a5a6') for p in top_pipes['清淤优先级']],
+            text=top_pipes['风险评分'].apply(lambda x: f'{x:.0f}'),
+            textposition='auto',
+            showlegend=False
+        ),
+        row=1, col=2
+    )
+
+    fig.update_layout(
+        title=dict(
+            text='清淤优先级排序看板',
+            x=0.5,
+            xanchor='center',
+            font=dict(size=16)
+        ),
+        template='plotly_white',
+        height=500,
+        showlegend=False
+    )
+
+    fig.update_xaxes(title_text='管段编号', row=1, col=2, tickangle=45)
+    fig.update_yaxes(title_text='风险评分', row=1, col=2)
+
     return fig
