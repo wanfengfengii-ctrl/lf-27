@@ -1388,16 +1388,43 @@ def apply_risk_rules(clicks, threshold_high, threshold_medium, growth_rate,
     if not clicks:
         return dash.no_update, ''
 
+    errors = []
+    th_high = float(threshold_high) if threshold_high is not None and threshold_high != '' else None
+    th_medium = float(threshold_medium) if threshold_medium is not None and threshold_medium != '' else None
+    th_growth = float(growth_rate) if growth_rate is not None and growth_rate != '' else None
+    th_dredge = float(dredging_threshold) if dredging_threshold is not None and dredging_threshold != '' else None
+
+    if th_high is not None and th_medium is not None:
+        if th_medium >= th_high:
+            errors.append(f'中风险阈值 ({th_medium:.0%}) 必须低于高风险阈值 ({th_high:.0%})')
+
+    if th_high is not None and (th_high <= 0 or th_high > 1):
+        errors.append('高风险阈值必须在 (0, 1] 之间')
+    if th_medium is not None and (th_medium < 0 or th_medium >= 1):
+        errors.append('中风险阈值必须在 [0, 1) 之间')
+    if th_growth is not None and th_growth < 0:
+        errors.append('异常增长率阈值必须大于等于 0')
+    if th_dredge is not None and (th_dredge < 0 or th_dredge > 1):
+        errors.append('清淤效果阈值必须在 [0, 1] 之间')
+
+    if errors:
+        error_status = dbc.Alert([
+            html.Div('❌ 风险预警配置校验失败，请修正以下问题：',
+                     style={'fontWeight': 'bold', 'marginBottom': '8px', 'color': '#c0392b'}),
+            html.Ul([html.Li(e, style={'color': '#c0392b'}) for e in errors])
+        ], color='danger', duration=8000)
+        return dash.no_update, error_status
+
     custom_rules = {}
 
-    if threshold_high is not None and threshold_high != '':
-        custom_rules['RISK_THRESHOLD_HIGH'] = float(threshold_high)
-    if threshold_medium is not None and threshold_medium != '':
-        custom_rules['RISK_THRESHOLD_MEDIUM'] = float(threshold_medium)
-    if growth_rate is not None and growth_rate != '':
-        custom_rules['ABNORMAL_GROWTH_RATE'] = float(growth_rate)
-    if dredging_threshold is not None and dredging_threshold != '':
-        custom_rules['DREDGING_EFFECT_THRESHOLD'] = float(dredging_threshold)
+    if th_high is not None:
+        custom_rules['RISK_THRESHOLD_HIGH'] = th_high
+    if th_medium is not None:
+        custom_rules['RISK_THRESHOLD_MEDIUM'] = th_medium
+    if th_growth is not None:
+        custom_rules['ABNORMAL_GROWTH_RATE'] = th_growth
+    if th_dredge is not None:
+        custom_rules['DREDGING_EFFECT_THRESHOLD'] = th_dredge
 
     custom_rules['MISSING_INSPECTION_ALERT'] = 'MISSING_INSPECTION_ALERT' in (alert_switches or [])
     custom_rules['ABNORMAL_GROWTH_ALERT'] = 'ABNORMAL_GROWTH_ALERT' in (alert_switches or [])
@@ -1437,8 +1464,8 @@ def update_dredge_batches(pipe_id):
     if pipe_data.empty:
         return [], None, [], None
 
-    batches = get_batches(GLOBAL_DATA['valid_df'])
-    batch_options = [{'label': b, 'value': b} for b in batches]
+    pipe_batches = get_batches(pipe_data)
+    batch_options = [{'label': b, 'value': b} for b in pipe_batches]
     return batch_options, None, batch_options, None
 
 
